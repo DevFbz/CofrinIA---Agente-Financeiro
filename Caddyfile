@@ -1,0 +1,5 @@
+# Troque pelo domínio quando tiver um. Enquanto isso, acesse a API via localhost/SSH tunnel.
+:80 {
+    encode gzip
+    reverse_proxy app:8000
+}
