@@ -53,7 +53,21 @@ def build_expense_text(ocr_text: str) -> str:
     if amount is None:
         raise ValueError("não encontrei o valor no comprovante")
     merchant = _merchant(ocr_text)
-    payment = " via Pix" if re.search(r"\bpix\b", ocr_text, re.IGNORECASE) else ""
+    payment = ""
+    if re.search(r"\bpix\b", ocr_text, re.IGNORECASE):
+        payment = " via Pix"
+    else:
+        card = re.search(
+            r"cart(?:ã|a)o(?:\s+de\s+(?:cr[eé]dito|d[eé]bito))?\s+([\wÀ-ÿ-]+)",
+            ocr_text,
+            re.IGNORECASE,
+        )
+        if card:
+            payment = f" via Cartão {card.group(1).title()}"
+        elif re.search(r"\bcr[eé]dito\b", ocr_text, re.IGNORECASE):
+            payment = " via cartão de crédito"
+        elif re.search(r"\bd[eé]bito\b", ocr_text, re.IGNORECASE):
+            payment = " via cartão de débito"
     return f"Gastei R$ {amount} no {merchant}{payment}"
 
 

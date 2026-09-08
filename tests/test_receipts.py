@@ -14,3 +14,11 @@ def test_builds_expense_text_from_receipt_ocr():
 def test_rejects_receipt_without_amount():
     with pytest.raises(ValueError, match="valor"):
         build_expense_text("MERCADO CENTRAL\nComprovante de compra")
+
+
+def test_preserves_named_card_from_receipt_ocr():
+    ocr = """FARMACIA CENTRAL\nTOTAL R$ 80,00\nCARTAO NUBANK"""
+
+    result = build_expense_text(ocr)
+
+    assert result == "Gastei R$ 80,00 no Farmacia Central via Cartão Nubank"
