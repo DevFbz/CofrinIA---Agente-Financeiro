@@ -8,7 +8,11 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY app ./app
-RUN pip install --upgrade pip && pip install .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-por \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --upgrade pip \
+    && pip install .
 RUN mkdir -p /models && chown -R nobody:nogroup /models
 
 USER nobody

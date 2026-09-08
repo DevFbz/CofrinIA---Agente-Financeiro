@@ -57,3 +57,19 @@ def test_audio_without_transcription_config_returns_friendly_message(monkeypatch
     assert response.status_code == 200
     assert response.json()["status"] == "audio_unavailable"
     assert "não consegui interpretá-lo" in response.json()["reply"]
+
+
+def test_image_without_ocr_connection_returns_friendly_message():
+    payload = {
+        "event": "messages.upsert",
+        "data": {
+            "key": {"remoteJid": "5511999999999@s.whatsapp.net", "fromMe": False, "id": f"image-{uuid4()}"},
+            "message": {"imageMessage": {"mimetype": "image/jpeg"}},
+        },
+    }
+
+    response = TestClient(app).post("/webhooks/evolution/messages-upsert", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "image_unavailable"
+    assert "comprovante" in response.json()["reply"].lower()

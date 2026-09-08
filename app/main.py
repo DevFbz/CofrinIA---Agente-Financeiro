@@ -11,6 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.integrations.audio import AudioTranscriber, AudioTranscriptionError
+from app.integrations.receipts import ReceiptInterpretationError, ReceiptInterpreter
 from app.services.finance import FinanceService
 
 app = FastAPI(title="Finance WhatsApp Assistant", version="0.2.0")
@@ -37,14 +38,22 @@ def _signature_is_valid(body: bytes, signature: str | None, static_secret: str |
 
 def _extract_evolution_message(
     payload: dict[str, Any],
-) -> tuple[str | None, str | None, str | None, bool, bool, dict[str, Any]]:
+) -> tuple[str | None, str | None, str | None, bool, bool, bool, dict[str, Any]]:
     data = payload.get("data", payload)
     message = data.get("message", {}) if isinstance(data, dict) else {}
     text = message.get("conversation") or message.get("extendedTextMessage", {}).get("text")
     key = data.get("key", {}) if isinstance(data, dict) else {}
     remote_jid = key.get("remoteJid")
     message_id = key.get("id")
-    return text, remote_jid, message_id, bool(key.get("fromMe")), bool(message.get("audioMessage")), key
+    return (
+        text,
+        remote_jid,
+        message_id,
+        bool(key.get("fromMe")),
+        bool(message.get("audioMessage")),
+        bool(message.get("imageMessage")),
+        key,
+    )
 
 
 @app.get("/health")
@@ -91,7 +100,7 @@ async def evolution_webhook(
     if not _signature_is_valid(body, x_webhook_signature, x_evolution_webhook_secret):
         raise HTTPException(status_code=401, detail="assinatura inválida")
     payload = await request.json()
-    text, remote_jid, message_id, from_me, is_audio, message_key = _extract_evolution_message(payload)
+    text, remote_jid, message_id, from_me, is_audio, is_image, message_key = _extract_evolution_message(payload)
     if not remote_jid or remote_jid.endswith("@g.us") or from_me:
         return {"status": "ignored"}
 
@@ -110,6 +119,18 @@ async def evolution_webhook(
                 "reply": "🎙️ Recebi seu áudio, mas não consegui interpretá-lo agora. "
                 "Tente enviar o texto ou gravar o áudio novamente, por favor.",
             }
+    if is_image:
+        try:
+            recognized_text = await ReceiptInterpreter().interpret(message_key)
+            text = f"{recognized_text} {text or ''}".strip()
+        except ReceiptInterpretationError:
+            logger.exception("failed to interpret incoming receipt image")
+            reply = (
+                "🧾 Recebi a imagem do comprovante, mas não consegui identificar o valor agora.\n\n"
+                "Tente enviar uma foto mais nítida, com o total visível, ou me informe o gasto por texto."
+            )
+            await _send_reply(remote_jid, reply)
+            return {"status": "image_unavailable", "reply": reply}
     if not text:
         return {"status": "ignored"}
 

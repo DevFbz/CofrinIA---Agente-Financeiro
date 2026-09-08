@@ -61,6 +61,7 @@ Tudo certo por aqui 😊
 | Consultas de quantidade e lançamentos recentes | ✅ Implementado |
 | Integração Evolution API | ✅ Implementado |
 | Transcrição local com faster-whisper | ✅ Implementado |
+| Leitura local de imagem de comprovante com OCR | ✅ Implementado |
 | Relatórios mensais completos | 🚧 Próxima etapa |
 | Leitura de PDF de nota fiscal | 🚧 Próxima etapa |
 | Orçamentos e metas | 🚧 Próxima etapa |
