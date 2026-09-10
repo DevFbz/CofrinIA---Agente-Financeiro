@@ -13,7 +13,7 @@ class TransactionDraft:
     payment_method: str = "não informado"
 
 
-_AMOUNT_RE = re.compile(r"(?:r\$\s*)?([0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{1,2})|[0-9]+(?:[,.][0-9]{1,2})?)", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"(?:r\$\s*)?([0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]{1,2})?|[0-9]+(?:[,.][0-9]{1,2})?)\b", re.IGNORECASE)
 
 
 def _amount_from_text(text: str) -> float:
@@ -25,7 +25,7 @@ def _amount_from_text(text: str) -> float:
         raw = raw.replace(".", "").replace(",", ".")
     elif "," in raw:
         raw = raw.replace(",", ".")
-    elif raw.count(".") > 1:
+    elif "." in raw and (len(raw.rsplit(".", 1)[1]) == 3 or raw.count(".") > 1):
         raw = raw.replace(".", "")
     return float(raw)
 
@@ -63,10 +63,11 @@ def _category(text: str, transaction_type: str) -> str:
     if transaction_type == "income" and any(word in normalized for word in ("salário", "salario", "ordenado")):
         return "salario"
     categories = {
-        "alimentacao": ("almoço", "almoco", "jantar", "lanche", "comida", "restaurante", "mercado"),
+        "alimentacao": ("almoço", "almoco", "jantar", "lanche", "comida", "restaurante", "mercado", "padaria", "delivery", "ifood"),
         "transporte": ("gasolina", "combustível", "combustivel", "uber", "ônibus", "onibus"),
         "moradia": ("aluguel", "condomínio", "condominio", "luz", "água", "agua"),
         "lazer": ("cinema", "viagem", "jogo", "bar"),
+        "saude": ("farmácia", "farmacia", "remédio", "remedio", "consulta", "médico", "medico", "hospital"),
     }
     for category, words in categories.items():
         if any(word in normalized for word in words):
@@ -82,14 +83,27 @@ def parse_transaction_text(text: str) -> TransactionDraft:
     amount = _amount_from_text(text)
     payment_method = _payment_method(text)
     description = re.sub(r"\s+", " ", text).strip()
-    description = re.sub(r"^(?:gastei|paguei|comprei|recebi|ganhei)\s+", "", description, flags=re.IGNORECASE)
-    description = re.sub(r"^(?:r\$\s*)?[0-9.,]+\s*(?:em|no|na|de)?\s*", "", description, flags=re.IGNORECASE)
+    description = re.sub(r"^(?:(?:um|eu|olha|então|entao)\s+)*(?:gastei|paguei|comprei|recebi|ganhei)\s+", "", description, flags=re.IGNORECASE)
+    description = re.sub(r"[.!?]+$", "", description).strip()
     description = re.sub(
-        r"\s+(?:(?:via|com|usando|no|na)\s+)?(?:pix|dinheiro|esp[eé]cie|cart(?:ã|a)o(?:\s+de\s+(?:cr[eé]dito|d[eé]bito))?(?:\s+[\wÀ-ÿ-]+)?)\s*$",
+        r"^(?:r\$\s*)?[0-9.,]+\s*(?:reais?|real|r\$)?\s*(?:em|no|na|de)?\s*",
+        "",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(
+        r"\s+(?:(?:via|com|usando|no|na)\s+)?(?:pix|dinheiro|esp[eé]cie|cr[eé]dito|d[eé]bito|cart(?:ã|a)o(?:\s+de\s+(?:cr[eé]dito|d[eé]bito))?(?:\s+[\wÀ-ÿ-]+)?)\s*$",
         "",
         description,
         flags=re.IGNORECASE,
     ).strip()
+    description = re.sub(
+        r"\s+(?:r\$\s*)?[0-9]{1,3}(?:\.[0-9]{3})*(?:,[0-9]{1,2})?\s*$",
+        "",
+        description,
+        flags=re.IGNORECASE,
+    ).strip()
+    description = re.sub(r"[,.;:!?]+$", "", description).strip()
     return TransactionDraft(
         transaction_type,
         amount,

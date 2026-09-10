@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import os
 import tempfile
 import threading
@@ -30,6 +31,10 @@ class AudioTranscriber:
         self.local_model = os.getenv("WHISPER_MODEL_SIZE", "base")
         self.local_device = os.getenv("WHISPER_DEVICE", "cpu")
         self.local_compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+        self.model_dir = os.getenv(
+            "WHISPER_MODEL_DIR",
+            str(Path.home() / ".cache" / "cofrinia" / "whisper_models"),
+        )
 
     async def transcribe(self, message_key: dict[str, Any]) -> str:
         if not self.evolution_url or not self.evolution_key or not self.instance:
@@ -93,7 +98,7 @@ class AudioTranscriber:
                         self.local_model,
                         device=self.local_device,
                         compute_type=self.local_compute_type,
-                        download_root=os.getenv("WHISPER_MODEL_DIR", "/models"),
+                        download_root=self.model_dir,
                     )
         try:
             segments, _ = _LOCAL_MODEL.transcribe(
@@ -123,17 +128,23 @@ class AudioTranscriber:
         except (httpx.HTTPError, ValueError) as exc:
             raise AudioTranscriptionError("não foi possível baixar o áudio") from exc
 
-        encoded = payload.get("base64")
+        nested = payload.get("data") if isinstance(payload, dict) else None
+        encoded = payload.get("base64") if isinstance(payload, dict) else None
+        if not encoded and isinstance(nested, dict):
+            encoded = nested.get("base64")
         if not encoded:
             raise AudioTranscriptionError("áudio sem conteúdo")
         if "," in encoded:
             encoded = encoded.split(",", 1)[1]
         try:
-            audio_bytes = base64.b64decode(encoded)
-        except ValueError as exc:
+            audio_bytes = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
             raise AudioTranscriptionError("áudio inválido") from exc
+        audio_message = message_key.get("message", {}).get("audioMessage", {})
+        mime_type = payload.get("mimetype") or audio_message.get("mimetype") or "audio/ogg"
+        filename = payload.get("fileName") or "mensagem.ogg"
         return (
             audio_bytes,
-            payload.get("fileName", "mensagem.ogg"),
-            payload.get("mimetype", "audio/ogg"),
+            filename,
+            mime_type,
         )

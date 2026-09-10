@@ -54,18 +54,26 @@ Tudo certo por aqui 😊
 |---|---:|
 | Registro de despesas e receitas | ✅ Implementado |
 | Categorias automáticas | ✅ Implementado |
+| Correção de categoria após lançamento | ✅ Implementado |
 | Identificação de Pix, dinheiro, crédito, débito e cartões | ✅ Implementado |
 | Usuários por telefone | ✅ Implementado |
 | Persistência PostgreSQL | ✅ Implementado |
 | Idempotência por mensagem WhatsApp | ✅ Implementado |
 | Consultas de quantidade e lançamentos recentes | ✅ Implementado |
+| Relatórios filtrados por categoria | ✅ Implementado |
+| Consulta de pagamentos recorrentes | ✅ Implementado |
+| Lembretes em minutos, horas e dias | ✅ Implementado |
 | Integração Evolution API | ✅ Implementado |
 | Transcrição local com faster-whisper | ✅ Implementado |
 | Leitura local de imagem de comprovante com OCR | ✅ Implementado |
-| Relatórios mensais completos | 🚧 Próxima etapa |
-| Leitura de PDF de nota fiscal | 🚧 Próxima etapa |
-| Orçamentos e metas | 🚧 Próxima etapa |
-| Hermes Agent no fluxo de produção | 🚧 Planejado |
+| Relatórios diário, semanal e mensal | ✅ Implementado |
+| Confirmação humana persistente | ✅ Implementado |
+| Fallback Hermes para mensagens ambíguas | ✅ Implementado |
+| Worker de recorrências, parcelas e expiração | ✅ Implementado |
+| Idempotência de mensagens e entregas | ✅ Implementado |
+| Métricas operacionais `/metrics` | ✅ Implementado |
+| Exportação CSV e Excel | ✅ Implementado |
+| Importação de PDF | ⛔ Não utilizada |
 
 ---
 
@@ -85,6 +93,11 @@ flowchart LR
     E -. áudio .-> M[🎙️ Download da mídia]
     M --> T[🗣️ faster-whisper local]
     T --> P
+    P -. baixa confiança .-> H[🧠 Hermes Agent]
+    H --> C[✅ Confirmação humana]
+    C --> D
+    A --> WKR[⚙️ Worker]
+    WKR --> D
 ```
 
 ### Princípios importantes
@@ -110,13 +123,19 @@ finance-whatsapp-assistant/
 │   ├── infrastructure/
 │   │   └── repository.py         # PostgreSQL/SQLite e idempotência
 │   ├── integrations/
-│   │   └── audio.py              # Evolution + faster-whisper
+│   │   ├── audio.py              # Evolution + faster-whisper
+│   │   ├── exports.py             # CSV e Excel
+│   │   └── hermes.py             # Fallback estruturado
 │   ├── services/
 │   │   └── finance.py            # Casos de uso e respostas
-│   └── main.py                   # FastAPI e webhooks
+│   ├── main.py                   # FastAPI e webhooks
+│   └── worker.py                 # Ciclo de tarefas em background
 ├── tests/
+│   ├── test_delivery_idempotency.py
 │   ├── test_audio.py
+│   ├── test_exports.py
 │   ├── test_finance_service.py
+│   ├── test_worker.py
 │   ├── test_transactions.py
 │   └── test_webhooks.py
 ├── Dockerfile
@@ -127,6 +146,16 @@ finance-whatsapp-assistant/
 ├── .env.example
 └── .env.production.example
 ```
+
+---
+
+## 📚 Documentação complementar
+
+| Documento | Conteúdo |
+|---|---|
+| [Comandos e linguagem natural](docs/COMMANDS.md) | Mensagens, correções, relatórios, recorrências, lembretes, áudio e imagens |
+| [Referência da API](docs/API.md) | Webhooks, endpoints internos, exportações, métricas e ponte Hermes |
+| [Operação e deploy](docs/OPERATIONS.md) | Configuração, backups, worker, idempotência, logs e troubleshooting |
 
 ---
 
@@ -236,7 +265,19 @@ Serviços incluídos:
 | `postgres` | Dados financeiros | Rede Docker |
 | `redis` | Cache da Evolution | Rede Docker |
 | `evolution` | Automação WhatsApp | Apenas localhost |
+| `worker` | Recorrências, parcelas e expiração | Sem portas públicas |
 | `caddy` | Proxy reverso | Portas 80/443 |
+
+### Exportação de lançamentos
+
+Os endpoints internos exportam apenas os lançamentos do telefone informado e exigem `X-Internal-Token`:
+
+```text
+GET /internal/exports/transactions.csv?phone=5511999999999
+GET /internal/exports/transactions.xlsx?phone=5511999999999
+```
+
+O CSV usa UTF-8 com BOM e delimitador `;`, adequado ao Excel em português. O Excel é gerado com a aba `Lançamentos`, filtros e valores numéricos formatados como moeda.
 
 Verifique o estado:
 
@@ -310,6 +351,10 @@ A suíte atual cobre:
 - webhook Evolution;
 - mensagens próprias do bot;
 - fallback de áudio.
+- confirmação, correção, cancelamento e expiração de pendências;
+- idempotência de entregas agendadas;
+- worker em ciclo contínuo;
+- métricas operacionais.
 
 Comandos:
 
@@ -322,14 +367,8 @@ uv run ruff check app tests
 
 ## 🛣️ Próximos passos
 
-- [ ] Relatórios mensais enviados automaticamente;
-- [ ] Resumos por categoria e forma de pagamento;
-- [ ] Importação de PDF de nota fiscal;
-- [ ] Despesas parceladas e recorrentes;
-- [ ] Orçamentos e metas financeiras;
-- [ ] Exportação CSV/Excel;
-- [ ] Integração controlada com Hermes Agent;
-- [ ] Watchdog para reconexão da Evolution;
+- [ ] Consultas avançadas por categoria, cartão e comparação de períodos;
+- [ ] Watchdog dedicado para reconexão da Evolution;
 - [ ] API oficial da Meta como alternativa de produção.
 
 ---

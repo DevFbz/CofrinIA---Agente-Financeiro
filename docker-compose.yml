@@ -67,6 +67,20 @@ services:
     volumes:
       - whisper_models:/models
 
+  worker:
+    build:
+      context: .
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${APP_DB}
+      WORKER_INTERVAL_SECONDS: ${WORKER_INTERVAL_SECONDS:-60}
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

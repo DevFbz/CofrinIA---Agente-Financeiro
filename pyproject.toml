@@ -17,6 +17,7 @@ dependencies = [
   "faster-whisper>=1.2,<2",
   "pillow>=11,<12",
   "pytesseract>=0.3.13,<1",
+  "openpyxl>=3.1,<4",
 ]
 
 [dependency-groups]
