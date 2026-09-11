@@ -62,13 +62,15 @@ Tudo certo por aqui 😊
 | Consultas de quantidade e lançamentos recentes | ✅ Implementado |
 | Relatórios filtrados por categoria | ✅ Implementado |
 | Consulta de pagamentos recorrentes | ✅ Implementado |
-| Lembretes em minutos, horas e dias | ✅ Implementado |
+| Lembretes em minutos, horas, dias e horários absolutos | ✅ Implementado |
 | Integração Evolution API | ✅ Implementado |
 | Transcrição local com faster-whisper | ✅ Implementado |
 | Leitura local de imagem de comprovante com OCR | ✅ Implementado |
 | Relatórios diário, semanal e mensal | ✅ Implementado |
 | Confirmação humana persistente | ✅ Implementado |
 | Fallback Hermes para mensagens ambíguas | ✅ Implementado |
+| Atendimento conversacional Hermes com histórico curto | ✅ Implementado |
+| Reply nativo e presença `composing` no WhatsApp | ✅ Implementado |
 | Worker de recorrências, parcelas e expiração | ✅ Implementado |
 | Idempotência de mensagens e entregas | ✅ Implementado |
 | Métricas operacionais `/metrics` | ✅ Implementado |
@@ -83,19 +85,20 @@ Tudo certo por aqui 😊
 flowchart LR
     W[📱 WhatsApp] --> E[🔌 Evolution API]
     E -->|messages-upsert| A[⚡ FastAPI]
-    A --> P[🧠 Parser determinístico]
-    A --> S[💼 FinanceService]
+    A --> M[🎙️ Áudio / 🧾 OCR]
+    M --> C[🧠 Contexto por telefone]
+    A --> P[🧠 Parser seguro]
+    C --> H[🤖 Hermes conversacional]
+    P -. fallback/ambiguidade .-> H
+    H --> V[✅ Validação de intenção]
+    P --> V
+    V --> S[💼 FinanceService]
     S --> D[(🐘 PostgreSQL)]
-    S --> R[💬 Resposta cordial]
+    S --> R[💬 Reply + presença]
     R --> E
     E --> W
-
-    E -. áudio .-> M[🎙️ Download da mídia]
-    M --> T[🗣️ faster-whisper local]
-    T --> P
-    P -. baixa confiança .-> H[🧠 Hermes Agent]
-    H --> C[✅ Confirmação humana]
-    C --> D
+    S --> CFM[✅ Confirmação humana]
+    CFM --> D
     A --> WKR[⚙️ Worker]
     WKR --> D
 ```
@@ -108,6 +111,8 @@ flowchart LR
 4. **Eventos do WhatsApp são idempotentes por ID da mensagem.**
 5. **Segredos ficam fora do código e fora do Git.**
 6. **Erros internos são registrados nos logs, mas nunca expostos ao usuário.**
+7. **Hermes interpreta e conversa; o backend valida e executa.**
+8. **Datas e horários são resolvidos pelo backend em `America/Sao_Paulo`.**
 
 ---
 
@@ -130,11 +135,15 @@ finance-whatsapp-assistant/
 │   │   └── finance.py            # Casos de uso e respostas
 │   ├── main.py                   # FastAPI e webhooks
 │   └── worker.py                 # Ciclo de tarefas em background
+├── infra/
+│   └── hermes-bridge/app.py      # Ponte Hermes sem segredos
 ├── tests/
+│   ├── test_advanced_domain.py
 │   ├── test_delivery_idempotency.py
 │   ├── test_audio.py
 │   ├── test_exports.py
 │   ├── test_finance_service.py
+│   ├── test_hermes.py
 │   ├── test_worker.py
 │   ├── test_transactions.py
 │   └── test_webhooks.py
@@ -312,7 +321,8 @@ O projeto usa `faster-whisper` localmente por padrão:
 
 ```env
 AUDIO_TRANSCRIPTION_PROVIDER=local
-WHISPER_MODEL_SIZE=base
+WHISPER_MODEL_SIZE=small
+WHISPER_BEAM_SIZE=5
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE_TYPE=int8
 ```
@@ -367,9 +377,11 @@ uv run ruff check app tests
 
 ## 🛣️ Próximos passos
 
-- [ ] Consultas avançadas por categoria, cartão e comparação de períodos;
+- [ ] Revisar/remover, com autorização, os três lançamentos históricos criados a partir de horários;
+- [ ] Implementar retenção configurável para o histórico conversacional;
 - [ ] Watchdog dedicado para reconexão da Evolution;
-- [ ] API oficial da Meta como alternativa de produção.
+- [ ] Avaliar migração para a API oficial da Meta;
+- [ ] Avaliar gateway WhatsApp nativo do Hermes em número separado.
 
 ---
 

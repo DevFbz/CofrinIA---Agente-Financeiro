@@ -6,9 +6,11 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.domain.advanced import (
+    ReminderDraft,
     parse_budget_text,
     parse_installment_text,
     parse_recurring_text,
@@ -19,7 +21,7 @@ from app.infrastructure.repository import FinanceRepository
 from app.integrations.hermes import HermesInterpretationError, HermesInterpreter
 
 logger = logging.getLogger(__name__)
-BRAZIL_TIMEZONE = timezone(timedelta(hours=-3))
+BRAZIL_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
 
 @dataclass(frozen=True)
@@ -76,8 +78,10 @@ class FinanceService:
     ) -> FinanceResult:
         await self.initialize()
         first_message = await self.repository.ensure_user(phone)
+        history = await self.repository.recent_conversation(phone)
         if not await self.repository.mark_message_once(message_id, phone):
             return FinanceResult("", None, duplicate=True)
+        await self.repository.append_conversation_message(phone, "user", message, message_id)
 
         try:
             current_day = today or datetime.now(BRAZIL_TIMEZONE).date()
@@ -129,9 +133,31 @@ class FinanceService:
                 reply = f"✅ Salário mensal salvo: *{self._money(salary_transaction.amount)}*. Agora vou acompanhar seus gastos e avisar a cada 10% do salário utilizado."
                 return FinanceResult(self._with_welcome(reply, first_message), None)
 
-            if "me lembre" in normalized or "lembre-me" in normalized:
-                reminder = parse_reminder_text(message)
-                await self.repository.add_reminder(phone, reminder)
+            if self._is_reminder_request(normalized):
+                try:
+                    reminder = parse_reminder_text(message)
+                except ValueError:
+                    try:
+                        interpreted = await HermesInterpreter().interpret(phone, message, history=history)
+                    except HermesInterpretationError:
+                        return FinanceResult(
+                            self._with_welcome(
+                                "⏰ Claro! Diga o que devo lembrar e para quando. "
+                                "Exemplo: *me lembre de pagar a conta hoje às 18:30*.",
+                                first_message,
+                            ),
+                            None,
+                        )
+                    reminder = self._reminder_from_hermes(interpreted)
+                    if reminder is None:
+                        return FinanceResult(
+                            self._with_welcome(
+                                str(interpreted.get("reply") or "⏰ Diga o que devo lembrar e para quando."),
+                                first_message,
+                            ),
+                            None,
+                        )
+                await self.repository.add_reminder(phone, reminder, source_message_id=message_id)
                 return FinanceResult(self._with_welcome(f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{reminder.message}*.", first_message), None)
 
             if self._is_recurring_query(normalized):
@@ -170,9 +196,11 @@ class FinanceService:
 
             try:
                 transaction = parse_transaction_text(message)
+                if not self._is_clear_transaction_message(normalized):
+                    raise ValueError("não identifiquei um registro financeiro claro")
                 if self._is_ambiguous_message(normalized):
                     try:
-                        interpreted = await HermesInterpreter().interpret(phone, message)
+                        interpreted = await HermesInterpreter().interpret(phone, message, history=history)
                     except HermesInterpretationError:
                         logger.exception("failed to interpret ambiguous finance message")
                         return FinanceResult("🤔 Essa mensagem parece ambígua. Confirme o valor, a descrição e o pagamento antes de eu registrar.", None)
@@ -193,7 +221,7 @@ class FinanceService:
                     )
             except ValueError as local_error:
                 try:
-                    interpreted = await HermesInterpreter().interpret(phone, message)
+                    interpreted = await HermesInterpreter().interpret(phone, message, history=history)
                 except HermesInterpretationError:
                     raise local_error
                 if interpreted.get("amount") is None:
@@ -288,6 +316,44 @@ class FinanceService:
         if amount_match:
             values["amount_cents"] = round(float(amount_match.group(1).replace(",", ".")) * 100)
         return values
+
+    @staticmethod
+    def _reminder_from_hermes(data: dict[str, object]) -> ReminderDraft | None:
+        if data.get("intent") != "create_reminder":
+            return None
+        reminder_text = str(data.get("reminder_text") or "").strip()
+        reminder_schedule = str(data.get("reminder_schedule") or "").strip()
+        if not reminder_text or not reminder_schedule:
+            return None
+        try:
+            return parse_reminder_text(f"me lembre de {reminder_text} {reminder_schedule}")
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _is_clear_transaction_message(message: str) -> bool:
+        if any(
+            verb in message
+            for verb in ("gastei", "paguei", "comprei", "recebi", "ganhei", "transferi")
+        ):
+            return True
+        return bool(
+            re.fullmatch(
+                r"[\wÀ-ÿ$\s-]{2,60}\s+(?:r\$\s*)?\d+(?:[.,]\d{1,2})?",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _is_reminder_request(message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:lembrete|lembrar|lembre|avise|avisa)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
 
     @staticmethod
     def _is_recurring_query(message: str) -> bool:

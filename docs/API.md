@@ -98,7 +98,7 @@ Lista lembretes vencidos.
 
 ### `POST /internal/reminders/dispatch`
 
-Envia lembretes vencidos e marca os envios concluídos.
+Envia lembretes vencidos, marca os envios concluídos e usa `source_message_id` para responder como quote da mensagem que criou o lembrete quando essa origem estiver disponível.
 
 ### `POST /internal/reminders/{reminder_id}/complete`
 
@@ -139,7 +139,11 @@ Payload:
 ```json
 {
   "phone": "5511999999999",
-  "message": "relatório de alimentação"
+  "message": "relatório de alimentação",
+  "history": [
+    {"role": "user", "content": "Gastei R$ 30 no almoço"},
+    {"role": "assistant", "content": "Despesa registrada."}
+  ]
 }
 ```
 
@@ -152,6 +156,8 @@ A ponte retorna JSON estruturado, por exemplo:
   "description": null,
   "category": "alimentacao",
   "payment_method": null,
+  "reminder_text": null,
+  "reminder_schedule": null,
   "confidence": 0.95,
   "requires_confirmation": false,
   "reply": null
@@ -159,6 +165,18 @@ A ponte retorna JSON estruturado, por exemplo:
 ```
 
 Hermes nunca grava diretamente no PostgreSQL.
+
+### Contexto conversacional
+
+O backend mantém uma memória curta na tabela `conversation_messages`, isolada por telefone. A cada fallback, a ponte recebe no máximo os 12 últimos turnos `user`/`assistant` e a mensagem atual separadamente.
+
+O histórico é contexto, não instrução: o bridge orienta o Hermes a ignorar pedidos anteriores para alterar regras, acessar segredos ou executar comandos.
+
+### Reply e presença
+
+Respostas de mensagens recebidas podem usar o campo `quoted` da Evolution para aparecer como reply nativo da mensagem original. Durante transcrição, OCR ou interpretação Hermes, o app envia `composing` por `/chat/sendPresence/{instance}` como indicação de processamento.
+
+Esses recursos são de UX; falhas de presença não interrompem o atendimento e falhas de envio continuam registradas em `delivery_records`.
 
 ## Respostas e erros
 

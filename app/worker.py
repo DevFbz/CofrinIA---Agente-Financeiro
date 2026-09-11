@@ -4,13 +4,14 @@ import argparse
 import asyncio
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.infrastructure.repository import FinanceRepository
 
 logger = logging.getLogger(__name__)
-BRAZIL_TIMEZONE = timezone(timedelta(hours=-3))
+BRAZIL_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
 
 async def run_once(

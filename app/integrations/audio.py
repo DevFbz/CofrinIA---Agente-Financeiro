@@ -28,9 +28,10 @@ class AudioTranscriber:
         self.provider = os.getenv("AUDIO_TRANSCRIPTION_PROVIDER", "local").casefold()
         self.openai_key = os.getenv("OPENAI_API_KEY")
         self.openai_model = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "whisper-1")
-        self.local_model = os.getenv("WHISPER_MODEL_SIZE", "base")
+        self.local_model = os.getenv("WHISPER_MODEL_SIZE", "small")
         self.local_device = os.getenv("WHISPER_DEVICE", "cpu")
         self.local_compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+        self.local_beam_size = max(1, min(10, int(os.getenv("WHISPER_BEAM_SIZE", "5"))))
         self.model_dir = os.getenv(
             "WHISPER_MODEL_DIR",
             str(Path.home() / ".cache" / "cofrinia" / "whisper_models"),
@@ -104,7 +105,7 @@ class AudioTranscriber:
             segments, _ = _LOCAL_MODEL.transcribe(
                 audio_path,
                 language="pt",
-                beam_size=1,
+                beam_size=self.local_beam_size,
                 vad_filter=True,
             )
             text = " ".join(segment.text.strip() for segment in segments).strip()

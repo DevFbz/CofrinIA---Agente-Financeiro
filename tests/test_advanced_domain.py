@@ -59,6 +59,27 @@ def test_parses_daqui_a_reminder_minutes():
     assert result.due_at == datetime(2026, 9, 8, 8, 36, tzinfo=timezone(timedelta(hours=-3)))
 
 
+def test_parses_natural_reminder_with_absolute_time():
+    now = datetime(2026, 9, 10, 10, 35, tzinfo=timezone(timedelta(hours=-3)))
+
+    result = parse_reminder_text(
+        "Criar lembrete de melhorar o robô para orquestrar a infra às 18:30 horas",
+        now=now,
+    )
+
+    assert result.message == "melhorar o robô para orquestrar a infra"
+    assert result.due_at == datetime(2026, 9, 10, 18, 30, tzinfo=timezone(timedelta(hours=-3)))
+
+
+def test_parses_natural_reminder_without_space_in_time_unit():
+    now = datetime(2026, 9, 10, 10, 35, tzinfo=timezone(timedelta(hours=-3)))
+
+    result = parse_reminder_text("Lembrar de fazer atualização no robô às 18h30", now=now)
+
+    assert result.message == "fazer atualização no robô"
+    assert result.due_at == datetime(2026, 9, 10, 18, 30, tzinfo=timezone(timedelta(hours=-3)))
+
+
 def test_rejects_invalid_recurring_day():
     with pytest.raises(ValueError, match="dia"):
         parse_recurring_text("aluguel de R$ 1.000 todo dia 35")

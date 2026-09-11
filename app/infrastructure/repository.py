@@ -91,6 +91,7 @@ reminders = Table(
     Column("message", String(500), nullable=False),
     Column("due_at", DateTime(timezone=True), nullable=False),
     Column("sent", Boolean, nullable=False, default=False),
+    Column("source_message_id", String(255), nullable=True),
 )
 
 pending_confirmations = Table(
@@ -120,6 +121,17 @@ delivery_records = Table(
     Column("last_error", String(500), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True), nullable=True),
+)
+
+conversation_messages = Table(
+    "conversation_messages",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("phone", String(32), nullable=False, index=True),
+    Column("role", String(16), nullable=False),
+    Column("content", String(4000), nullable=False),
+    Column("message_id", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
 def database_url() -> str:
@@ -154,6 +166,15 @@ class FinanceRepository:
                     )
                 except SQLAlchemyError:
                     pass
+            reminder_column = (
+                "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS source_message_id VARCHAR(255)"
+                if connection.dialect.name == "postgresql"
+                else "ALTER TABLE reminders ADD COLUMN source_message_id VARCHAR(255)"
+            )
+            try:
+                await connection.execute(text(reminder_column))
+            except SQLAlchemyError:
+                pass
             for statement in (
                 "ALTER TABLE users ADD COLUMN salary_cents INTEGER",
                 "ALTER TABLE users ADD COLUMN salary_alert_level INTEGER NOT NULL DEFAULT 0",
@@ -166,6 +187,42 @@ class FinanceRepository:
 
     async def close(self) -> None:
         await self.engine.dispose()
+
+    async def append_conversation_message(
+        self,
+        phone: str,
+        role: str,
+        content: str,
+        message_id: str | None = None,
+    ) -> None:
+        content = (content or "").strip()
+        if not content:
+            return
+        async with self.sessions() as session:
+            await session.execute(
+                insert(conversation_messages).values(
+                    phone=phone,
+                    role=role,
+                    content=content[:4000],
+                    message_id=message_id,
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
+    async def recent_conversation(self, phone: str, limit: int = 12) -> list[dict[str, Any]]:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(
+                    conversation_messages.c.role,
+                    conversation_messages.c.content,
+                    conversation_messages.c.created_at,
+                )
+                .where(conversation_messages.c.phone == phone)
+                .order_by(desc(conversation_messages.c.id))
+                .limit(max(1, min(limit, 50)))
+            )
+            return [dict(row._mapping) for row in reversed(result.all())]
 
     async def ensure_user(self, phone: str) -> bool:
         async with self.sessions() as session:
@@ -405,9 +462,17 @@ class FinanceRepository:
             spent_result = await session.execute(select(transactions.c.amount_cents).where(transactions.c.phone == phone, transactions.c.type == "expense", transactions.c.category == category, transactions.c.occurred_on >= month_start, transactions.c.occurred_on < next_month))
             return int(limit), sum(spent_result.scalars())
 
-    async def add_reminder(self, phone: str, draft: Any) -> None:
+    async def add_reminder(self, phone: str, draft: Any, source_message_id: str | None = None) -> None:
         async with self.sessions() as session:
-            await session.execute(insert(reminders).values(phone=phone, message=draft.message, due_at=draft.due_at, sent=False))
+            await session.execute(
+                insert(reminders).values(
+                    phone=phone,
+                    message=draft.message,
+                    due_at=draft.due_at,
+                    sent=False,
+                    source_message_id=source_message_id,
+                )
+            )
             await session.commit()
 
     async def due_reminders(self, now: Any) -> list[dict[str, Any]]:

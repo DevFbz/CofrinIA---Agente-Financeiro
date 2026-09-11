@@ -104,6 +104,8 @@ Comprei uma TV de R$ 2.400 em 12 vezes no cartão
 Me lembre de pagar a conta daqui a 10 minutos
 Lembre-me de ligar para o banco em 5 horas
 Me lembre de revisar o orçamento em 2 dias
+Criar lembrete de revisar o robô às 18:30 horas
+Lembrar de fazer atualização amanhã às 8h30
 ```
 
 Também são aceitas formas sem espaço, como `10minutos`. Quando nenhuma duração é informada, o padrão é de 3 horas.
@@ -114,7 +116,7 @@ Envie um áudio curto falando naturalmente, por exemplo:
 
 > Gastei trinta reais no almoço via Pix.
 
-O áudio é baixado pela Evolution, transcrito localmente pelo `faster-whisper` e encaminhado ao mesmo fluxo de texto. O modelo atual é o `base`, executado em CPU.
+O áudio é baixado pela Evolution, transcrito localmente pelo `faster-whisper` e encaminhado ao mesmo fluxo de texto. O modelo padrão é o `small`, executado em CPU com `beam_size=5` para melhorar o português em áudios curtos.
 
 Em caso de transcrição incompleta, o bot pede o valor ou uma nova mensagem; não grava um lançamento sem dados suficientes.
 
@@ -139,3 +141,17 @@ O que devo fazer para reduzir despesas?
 ```
 
 O Hermes responde em português brasileiro e não grava dados diretamente.
+
+## Como o atendimento funciona
+
+O usuário conversa livremente. O CofrinIA tenta primeiro os fluxos determinísticos e seguros para operações claras. Quando a mensagem é ambígua, conversacional, contém uma pergunta de continuidade ou não tem um comando reconhecido, o Hermes recebe a mensagem atual e o contexto recente daquele telefone.
+
+O Hermes pode:
+
+- responder perguntas gerais;
+- identificar consultas, categorias, recorrências e parcelas;
+- pedir os dados que faltam para um lembrete;
+- classificar uma intenção financeira e solicitar confirmação;
+- continuar uma conversa usando os turnos anteriores.
+
+O Hermes não pode gravar diretamente, alterar o banco ou inventar valores. O backend valida a intenção, resolve datas no fuso `America/Sao_Paulo`, executa a operação e envia a resposta como reply da mensagem original quando houver um `message_id`.

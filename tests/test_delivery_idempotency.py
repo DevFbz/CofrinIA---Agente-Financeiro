@@ -97,3 +97,55 @@ async def test_stale_delivery_claim_can_be_recovered(repository):
 
     assert first is True
     assert recovered is True
+
+
+@pytest.mark.asyncio
+async def test_send_reply_includes_native_whatsapp_quote(repository, monkeypatch):
+    from app import main
+
+    class FakeResponse:
+        status_code = 201
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"key": {"id": "outbound-quote"}}
+
+    class FakeClient:
+        payload = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, _url, **kwargs):
+            self.payload = kwargs["json"]
+            return FakeResponse()
+
+    client = FakeClient()
+    original_service = main.finance_service
+    main.finance_service = FinanceService(repository)
+    monkeypatch.setenv("EVOLUTION_API_URL", "http://evolution")
+    monkeypatch.setenv("EVOLUTION_API_KEY", "test-key")
+    monkeypatch.setenv("EVOLUTION_INSTANCE", "financeiro")
+    monkeypatch.setattr(main.httpx, "AsyncClient", lambda **kwargs: client)
+    try:
+        result = await main._send_reply(
+            "5511999999999@s.whatsapp.net",
+            "Entendi sua mensagem.",
+            delivery_key="reply:quote-1",
+            delivery_kind="inbound_reply",
+            quoted_message={"remoteJid": "5511999999999@s.whatsapp.net", "fromMe": False, "id": "inbound-1"},
+            quoted_text="Pode me ajudar?",
+        )
+    finally:
+        main.finance_service = original_service
+
+    assert result is True
+    assert client.payload["quoted"] == {
+        "key": {"remoteJid": "5511999999999@s.whatsapp.net", "fromMe": False, "id": "inbound-1"},
+        "message": {"conversation": "Pode me ajudar?"},
+    }

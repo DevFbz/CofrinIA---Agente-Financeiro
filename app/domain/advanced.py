@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -76,24 +77,72 @@ def parse_budget_text(text: str) -> BudgetDraft:
 
 
 def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft:
-    brazil = timezone(timedelta(hours=-3))
+    brazil = ZoneInfo("America/Sao_Paulo")
     current = now or datetime.now(brazil)
-    match = re.search(
-        r"(?:me lembre|lembre-me)\s+de\s+(.+?)(?:\s+(?:em|daqui a)\s+(\d+)\s*(minutos?|mins?|m|horas?|h|dias?|d))?$",
-        text,
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=brazil)
+    else:
+        current = current.astimezone(brazil)
+    prefix = re.match(
+        r"^(?:me\s+lembre|lembre[- ]me|me\s+lembrar|lembrar|"
+        r"criar\s+(?:um\s+)?lembrete|lembrete|"
+        r"(?:pode\s+)?me\s+lembrar|me\s+avise|avise[- ]me|"
+        r"quero\s+que\s+me\s+lembre)"
+        r"(?:\s+(?:de|para|que))?\s*(?P<body>.+)$",
+        text.strip(),
         re.IGNORECASE,
     )
-    if not match:
+    if not prefix:
         raise ValueError("informe o que devo lembrar")
-    message = match.group(1).strip()
-    quantity = match.group(2)
-    unit = (match.group(3) or "horas").casefold()
-    if quantity is None:
-        delta = timedelta(hours=3)
-    elif unit.startswith(("min", "m")):
-        delta = timedelta(minutes=int(quantity))
-    elif unit.startswith(("dia", "d")):
-        delta = timedelta(days=int(quantity))
-    else:
-        delta = timedelta(hours=int(quantity))
-    return ReminderDraft(message, current + delta)
+    body = prefix.group("body").strip(" .!?\t")
+    if not body:
+        raise ValueError("informe o que devo lembrar")
+
+    relative = re.search(
+        r"\s+(?:em|daqui\s+a)\s*(?P<quantity>\d+)\s*"
+        r"(?P<unit>minutos?|mins?|m|horas?|h|dias?|d)\s*$",
+        body,
+        re.IGNORECASE,
+    )
+    if relative:
+        message = body[: relative.start()].strip(" .,!?:;")
+        quantity = int(relative.group("quantity"))
+        unit = relative.group("unit").casefold()
+        if unit.startswith(("min", "m")):
+            delta = timedelta(minutes=quantity)
+        elif unit.startswith(("dia", "d")):
+            delta = timedelta(days=quantity)
+        else:
+            delta = timedelta(hours=quantity)
+        return ReminderDraft(message, current + delta)
+
+    absolute = re.search(
+        r"\s+(?:(?P<day>hoje|amanhã|amanha)\s+)?(?:às|as)\s+"
+        r"(?P<hour>\d{1,2})(?:(?::|h)(?P<minute>\d{2}))?\s*"
+        r"(?:horas?|h)?(?:\s+da\s+(?P<period>manhã|manha|tarde|noite))?\s*$",
+        body,
+        re.IGNORECASE,
+    )
+    if absolute:
+        hour = int(absolute.group("hour"))
+        minute = int(absolute.group("minute") or 0)
+        period = (absolute.group("period") or "").casefold()
+        if not 0 <= minute <= 59:
+            raise ValueError("os minutos do lembrete devem estar entre 00 e 59")
+        if not 0 <= hour <= 23:
+            raise ValueError("a hora do lembrete deve estar entre 00 e 23")
+        if period in {"noite", "tarde"} and 1 <= hour <= 11:
+            hour += 12
+        elif period in {"manhã", "manha"} and hour == 12:
+            hour = 0
+        message = body[: absolute.start()].strip(" .,!?:;")
+        target_date = current.date()
+        day = (absolute.group("day") or "").casefold()
+        if day in {"amanhã", "amanha"}:
+            target_date += timedelta(days=1)
+        due_at = datetime.combine(target_date, datetime.min.time(), tzinfo=brazil).replace(hour=hour, minute=minute)
+        if due_at <= current and day != "amanhã" and day != "amanha":
+            due_at += timedelta(days=1)
+        return ReminderDraft(message, due_at)
+
+    return ReminderDraft(body, current + timedelta(hours=3))

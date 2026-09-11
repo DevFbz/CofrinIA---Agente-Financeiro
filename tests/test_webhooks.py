@@ -119,8 +119,8 @@ def test_audio_message_is_transcribed_and_sent_to_finance(monkeypatch):
             TransactionDraft("expense", 30.0, "almoço", "alimentacao", "Pix"),
         )
 
-    async def fake_send_reply(*args):
-        sent.append(args)
+    async def fake_send_reply(*args, **kwargs):
+        sent.append((args, kwargs))
         return True
 
     monkeypatch.setattr("app.main.AudioTranscriber", FakeAudioTranscriber)
@@ -138,4 +138,4 @@ def test_audio_message_is_transcribed_and_sent_to_finance(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["status"] == "processed"
-    assert transcribed and sent[0][1] == "✅ Despesa registrada"
+    assert transcribed and sent[0][0][1] == "✅ Despesa registrada"

@@ -20,7 +20,8 @@ from app.services.finance import BRAZIL_TIMEZONE, FinanceService
 
 app = FastAPI(title="Finance WhatsApp Assistant", version="0.2.0")
 finance_service = FinanceService()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 
 class ProcessMessageRequest(BaseModel):
@@ -216,6 +217,11 @@ async def dispatch_due_reminders(x_internal_token: str | None = Header(default=N
             f"⏰ Lembrete: {reminder['message']}",
             f"reminder:{reminder['id']}",
             "reminder",
+            quoted_message={
+                "remoteJid": f"{reminder['phone']}@s.whatsapp.net",
+                "fromMe": False,
+                "id": reminder.get("source_message_id"),
+            },
         )
         (sent if ok else failed).append(reminder["id"])
         if ok:
@@ -253,6 +259,7 @@ async def complete_reminder(reminder_id: int, x_internal_token: str | None = Hea
 @app.post("/api/process")
 async def process_message(request: ProcessMessageRequest) -> dict[str, Any]:
     result = await finance_service.process_message(request.message, request.phone)
+    await finance_service.repository.append_conversation_message(request.phone, "assistant", result.reply)
     return {"reply": result.reply, "transaction": result.transaction}
 
 
@@ -266,6 +273,8 @@ async def _send_reply(
     text: str,
     delivery_key: str | None = None,
     delivery_kind: str = "reply",
+    quoted_message: dict[str, Any] | None = None,
+    quoted_text: str | None = None,
 ) -> bool:
     evolution_url = os.getenv("EVOLUTION_API_URL")
     evolution_key = os.getenv("EVOLUTION_API_KEY")
@@ -285,6 +294,15 @@ async def _send_reply(
     url = f"{evolution_url.rstrip('/')}/message/sendText/{instance}"
     headers = {"apikey": evolution_key}
     payload = {"number": remote_jid.split("@")[0], "text": text}
+    if quoted_message and quoted_message.get("id"):
+        quoted_key = {
+            key: quoted_message[key]
+            for key in ("remoteJid", "fromMe", "id", "participant")
+            if key in quoted_message
+        }
+        payload["quoted"] = {"key": quoted_key}
+        if quoted_text:
+            payload["quoted"]["message"] = {"conversation": quoted_text[:4000]}
     last_error: str | None = None
     for attempt in range(1, 4):
         try:
@@ -306,6 +324,28 @@ async def _send_reply(
     return False
 
 
+async def _send_presence(remote_jid: str) -> None:
+    evolution_url = os.getenv("EVOLUTION_API_URL")
+    evolution_key = os.getenv("EVOLUTION_API_KEY")
+    instance = os.getenv("EVOLUTION_INSTANCE")
+    if not evolution_url or not evolution_key or not instance:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.post(
+                f"{evolution_url.rstrip('/')}/chat/sendPresence/{instance}",
+                headers={"apikey": evolution_key},
+                json={
+                    "number": remote_jid.split("@")[0],
+                    "delay": 1200,
+                    "presence": "composing",
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        logger.info("Evolution presence unavailable", exc_info=True)
+
+
 @app.post("/webhooks/evolution")
 async def evolution_webhook(
     request: Request,
@@ -320,18 +360,27 @@ async def evolution_webhook(
     logger.info("incoming Evolution message jid_hash=%s from_me=%s audio=%s image=%s", hashlib.sha256((remote_jid or "").encode()).hexdigest()[:12], from_me, is_audio, is_image)
     if not remote_jid or remote_jid.endswith("@g.us") or from_me:
         return {"status": "ignored"}
+    destination = message_key.get("remoteJidAlt") or remote_jid
+    await _send_presence(destination)
 
     if is_audio and not text:
         try:
             text = await AudioTranscriber().transcribe(message_key)
+            logger.info(
+                "audio transcribed message_id=%s chars=%s",
+                message_id,
+                len(text),
+            )
         except AudioTranscriptionError:
             logger.exception("failed to transcribe incoming audio")
             await _send_reply(
-                message_key.get("remoteJidAlt") or remote_jid,
+                destination,
                 "🎙️ Recebi seu áudio, mas não consegui interpretá-lo agora. "
                 "Tente enviar o texto ou gravar o áudio novamente, por favor.",
                 f"reply:{message_id}" if message_id else None,
                 "inbound_reply",
+                quoted_message=message_key,
+                quoted_text=text,
             )
             return {
                 "status": "audio_unavailable",
@@ -349,10 +398,12 @@ async def evolution_webhook(
                 "Tente enviar uma foto mais nítida, com o total visível, ou me informe o gasto por texto."
             )
             await _send_reply(
-                message_key.get("remoteJidAlt") or remote_jid,
+                destination,
                 reply,
                 f"reply:{message_id}" if message_id else None,
                 "inbound_reply",
+                quoted_message=message_key,
+                quoted_text=text,
             )
             return {"status": "image_unavailable", "reply": reply}
     if not text:
@@ -365,9 +416,26 @@ async def evolution_webhook(
     )
     if result.duplicate:
         return {"status": "ignored"}
-    destination = message_key.get("remoteJidAlt") or remote_jid
+    logger.info(
+        "inbound processed message_id=%s transaction=%s reply_chars=%s",
+        message_id,
+        result.transaction is not None,
+        len(result.reply),
+    )
+    await finance_service.repository.append_conversation_message(
+        remote_jid.split("@")[0],
+        "assistant",
+        result.reply,
+    )
     delivery_key = f"reply:{message_id}" if message_id else None
-    await _send_reply(destination, result.reply, delivery_key, "inbound_reply")
+    await _send_reply(
+        destination,
+        result.reply,
+        delivery_key,
+        "inbound_reply",
+        quoted_message=message_key,
+        quoted_text=text,
+    )
     return {"status": "processed", "reply": result.reply}
 
 

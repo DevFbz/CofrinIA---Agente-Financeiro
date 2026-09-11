@@ -133,7 +133,7 @@ async def test_message_id_is_idempotent(service):
 @pytest.mark.asyncio
 async def test_pending_confirmation_accepts_category_correction(service, monkeypatch):
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             return {
                 "intent": "create_expense",
                 "amount": 240.0,
@@ -164,7 +164,7 @@ async def test_pending_confirmation_accepts_category_correction(service, monkeyp
 @pytest.mark.asyncio
 async def test_expire_pending_confirmation_changes_status(service, monkeypatch):
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             return {
                 "intent": "create_expense",
                 "amount": 100.0,
@@ -195,7 +195,7 @@ async def test_confirmation_command_without_pending_does_not_call_hermes(service
     calls = 0
 
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             nonlocal calls
             calls += 1
             return {
@@ -223,7 +223,7 @@ async def test_confirmation_command_without_pending_does_not_call_hermes(service
 @pytest.mark.asyncio
 async def test_confirm_pending_is_atomic_and_idempotent(service, monkeypatch):
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             return {
                 "intent": "create_expense",
                 "amount": 75.0,
@@ -250,7 +250,7 @@ async def test_confirm_pending_is_atomic_and_idempotent(service, monkeypatch):
 @pytest.mark.asyncio
 async def test_expired_confirmation_is_not_confirmed(service, monkeypatch):
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             return {
                 "intent": "create_expense",
                 "amount": 80.0,
@@ -282,7 +282,7 @@ async def test_ambiguous_transaction_with_amount_requires_confirmation(service, 
     calls = 0
 
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             nonlocal calls
             calls += 1
             return {
@@ -351,9 +351,134 @@ async def test_recurring_payment_query_lists_user_recurring_expenses(service):
 
 
 @pytest.mark.asyncio
+async def test_natural_reminder_is_not_registered_as_expense(service):
+    phone = "5511999030010"
+
+    result = await service.process_message(
+        "Criar lembrete de melhorar o robô para orquestrar a infra às 18:30 horas",
+        phone=phone,
+        today=date(2026, 9, 10),
+    )
+
+    assert result.transaction is None
+    assert "Lembrete criado" in result.reply
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_incomplete_reminder_request_asks_for_details(service):
+    phone = "5511999030011"
+
+    result = await service.process_message("Lembrete", phone=phone)
+
+    assert result.transaction is None
+    assert "o que" in result.reply.lower()
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_repository_keeps_recent_conversation_per_phone(service):
+    phone = "5511999030012"
+
+    await service.repository.append_conversation_message(phone, "user", "Gastei R$ 30 no almoço")
+    await service.repository.append_conversation_message(phone, "assistant", "Despesa registrada")
+
+    history = await service.repository.recent_conversation(phone)
+
+    assert [(item["role"], item["content"]) for item in history] == [
+        ("user", "Gastei R$ 30 no almoço"),
+        ("assistant", "Despesa registrada"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_general_message_with_amount_is_not_registered_as_expense(service):
+    phone = "5511999030013"
+
+    result = await service.process_message("Preciso de 1000 reais para uma emergência", phone=phone)
+
+    assert result.transaction is None
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_hermes_receives_recent_turns_for_conversational_follow_up(service, monkeypatch):
+    calls = []
+
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            calls.append(history)
+            return {
+                "intent": "unknown",
+                "amount": None,
+                "description": None,
+                "category": None,
+                "payment_method": None,
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "reply": "Posso continuar a conversa com você.",
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999030014"
+
+    first = await service.process_message("Como posso organizar meu orçamento?", phone=phone, message_id="context-1")
+    await service.repository.append_conversation_message(phone, "assistant", first.reply)
+    second = await service.process_message("E isso?", phone=phone, message_id="context-2")
+
+    assert second.transaction is None
+    assert len(calls) == 2
+    assert [(item["role"], item["content"]) for item in calls[1][-2:]] == [
+        ("user", "Como posso organizar meu orçamento?"),
+        ("assistant", first.reply),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hermes_reminder_schedule_is_resolved_by_backend(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "create_reminder",
+                "amount": None,
+                "description": None,
+                "category": None,
+                "payment_method": None,
+                "reminder_text": "revisar o orçamento",
+                "reminder_schedule": "às 18:30",
+                "confidence": 0.98,
+                "requires_confirmation": False,
+                "reply": None,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999030015"
+
+    result = await service.process_message("quero que você me ajude a lembrar disso", phone=phone)
+
+    assert result.transaction is None
+    assert "Lembrete criado" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_reminder_keeps_source_message_id_for_native_reply(service):
+    phone = "5511999030016"
+
+    result = await service.process_message(
+        "me lembre de revisar o orçamento em 10 minutos",
+        phone=phone,
+        message_id="reminder-source-1",
+    )
+
+    assert "Lembrete criado" in result.reply
+    reminders = await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=1))
+    assert reminders[-1]["source_message_id"] == "reminder-source-1"
+
+
+@pytest.mark.asyncio
 async def test_hermes_query_intent_returns_category_report(service, monkeypatch):
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             return {
                 "intent": "query_category",
                 "amount": None,
@@ -378,7 +503,7 @@ async def test_hermes_query_intent_returns_category_report(service, monkeypatch)
 @pytest.mark.asyncio
 async def test_hermes_reply_is_used_for_general_question(service, monkeypatch):
     class FakeHermes:
-        async def interpret(self, phone, message):
+        async def interpret(self, phone, message, history=None):
             return {
                 "intent": "unknown",
                 "amount": None,

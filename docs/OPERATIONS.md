@@ -22,6 +22,23 @@ worker
 
 O n8n permanece responsável pelos agendamentos e integrações visuais. O backend é a fonte oficial dos dados financeiros.
 
+## Atendimento Hermes no WhatsApp
+
+O modo recomendado para o CofrinIA atual é manter a Evolution como transporte e usar o Hermes como camada conversacional:
+
+```text
+Evolution webhook
+  → app normaliza texto/áudio/imagem
+  → app registra o turno e envia presença composing
+  → parser seguro ou ponte Hermes com contexto curto
+  → app valida/executa a intenção
+  → Evolution envia resposta com quote da mensagem original
+```
+
+O bridge usa uma execução Hermes restrita ao roteamento e à resposta. Ele não recebe credenciais financeiras, não grava no PostgreSQL e é instruído a não executar ferramentas. O contexto persistente fica em `conversation_messages`, isolado por telefone e limitado a 12 turnos enviados por chamada.
+
+O gateway nativo do Hermes também suporta WhatsApp, voz, streaming e rotinas, mas não deve compartilhar o mesmo número/sessão Baileys com a Evolution. Uma migração para esse modo exige número dedicado e uma ferramenta/API autenticada para o CofrinIA; por isso não é o caminho aplicado na operação atual.
+
 ## Variáveis de ambiente
 
 Nunca copie valores reais para este documento. Os nomes principais são:
@@ -40,7 +57,8 @@ COFRIN_INTERNAL_TOKEN=
 HERMES_API_URL=
 COFRIN_HERMES_TOKEN=
 AUDIO_TRANSCRIPTION_PROVIDER=local
-WHISPER_MODEL_SIZE=base
+WHISPER_MODEL_SIZE=small
+WHISPER_BEAM_SIZE=5
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE_TYPE=int8
 WHISPER_MODEL_DIR=/models
@@ -107,14 +125,17 @@ PostgreSQL, Redis, Evolution e Caddy não devem ser reiniciados sem necessidade.
 
 ## Banco existente
 
-O repositório executa `metadata.create_all` na inicialização. Em bases antigas, confira a existência das tabelas novas antes de usar as funcionalidades:
+O repositório executa `metadata.create_all` na inicialização e aplica alterações idempotentes de colunas conhecidas. Em bases antigas, confira a existência das tabelas novas antes de usar as funcionalidades:
 
 ```text
+conversation_messages
 pending_confirmations
 delivery_records
 ```
 
-A criação deve ser idempotente e nunca deve usar `DROP`, `TRUNCATE` ou recriação de volume em um deploy comum.
+A tabela `reminders` também deve conter `source_message_id` para permitir que o disparo seja enviado como reply da mensagem que criou o lembrete.
+
+A criação e as alterações de schema devem ser idempotentes e nunca devem usar `DROP`, `TRUNCATE` ou recriação de volume em um deploy comum.
 
 ## Worker
 
@@ -132,6 +153,8 @@ A cada ciclo ele:
 - registra o resultado no log sem dados financeiros sensíveis.
 
 O intervalo padrão é de 60 segundos e pode ser ajustado por `WORKER_INTERVAL_SECONDS`, respeitando o mínimo de 10 segundos.
+
+O worker não envia lembretes diretamente. O dispatch de lembretes é executado pelo workflow agendado do n8n, que chama `POST /internal/reminders/dispatch` com `X-Internal-Token`. O endpoint usa `delivery_records` para impedir duplicidade.
 
 ## Idempotência e entrega
 
@@ -158,7 +181,7 @@ whisper_models:/models
 Para verificar o cache dentro do container:
 
 ```bash
-docker exec finance-whatsapp-app-1 python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8', download_root='/models'); print('ready')"
+docker exec finance-whatsapp-app-1 python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8', download_root='/models'); print('ready')"
 ```
 
 O primeiro carregamento pode baixar o modelo e demorar. O processo normal roda como usuário não-root; não coloque chaves ou modelos dentro do Git.
