@@ -94,6 +94,19 @@ reminders = Table(
     Column("source_message_id", String(255), nullable=True),
 )
 
+pending_reminders = Table(
+    "pending_reminders",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("phone", String(32), nullable=False, index=True),
+    Column("message", String(500), nullable=False),
+    Column("source_message_id", String(255), nullable=True),
+    Column("status", String(16), nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+)
+
+
 pending_confirmations = Table(
     "pending_confirmations", metadata,
     Column("id", Integer, primary_key=True),
@@ -474,6 +487,60 @@ class FinanceRepository:
                 )
             )
             await session.commit()
+
+    async def save_pending_reminder(self, phone: str, message: str, source_message_id: str | None = None) -> None:
+        now = datetime.now(UTC)
+        async with self.sessions() as session:
+            await session.execute(
+                pending_reminders.update()
+                .where(pending_reminders.c.phone == phone, pending_reminders.c.status == "pending")
+                .values(status="replaced")
+            )
+            await session.execute(
+                insert(pending_reminders).values(
+                    phone=phone,
+                    message=message[:500],
+                    source_message_id=source_message_id,
+                    status="pending",
+                    created_at=now,
+                    expires_at=now + timedelta(hours=24),
+                )
+            )
+            await session.commit()
+
+    async def get_pending_reminder(self, phone: str) -> dict[str, Any] | None:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(pending_reminders)
+                .where(
+                    pending_reminders.c.phone == phone,
+                    pending_reminders.c.status == "pending",
+                    pending_reminders.c.expires_at > datetime.now(UTC),
+                )
+                .order_by(desc(pending_reminders.c.id))
+                .limit(1)
+            )
+            row = result.first()
+            return dict(row._mapping) if row else None
+
+    async def complete_pending_reminder(self, pending_id: int, status: str = "completed") -> None:
+        async with self.sessions() as session:
+            await session.execute(
+                pending_reminders.update()
+                .where(pending_reminders.c.id == pending_id, pending_reminders.c.status == "pending")
+                .values(status=status)
+            )
+            await session.commit()
+
+    async def expire_pending_reminders(self, now: datetime) -> int:
+        async with self.sessions() as session:
+            result = await session.execute(
+                pending_reminders.update()
+                .where(pending_reminders.c.status == "pending", pending_reminders.c.expires_at <= now)
+                .values(status="expired")
+            )
+            await session.commit()
+            return result.rowcount or 0
 
     async def due_reminders(self, now: Any) -> list[dict[str, Any]]:
         async with self.sessions() as session:

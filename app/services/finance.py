@@ -89,6 +89,42 @@ class FinanceService:
             await self.repository.mark_welcomed(phone)
             await self.repository.expire_pending_confirmations(datetime.now(UTC))
 
+            await self.repository.expire_pending_reminders(datetime.now(UTC))
+            pending_reminder = await self.repository.get_pending_reminder(phone)
+            if pending_reminder:
+                if normalized in {"cancelar", "cancela", "não", "nao"}:
+                    await self.repository.complete_pending_reminder(pending_reminder["id"], "cancelled")
+                    return FinanceResult("✅ Tudo bem. Não criei esse lembrete.", None)
+                if self._has_explicit_reminder_schedule(message):
+                    try:
+                        reminder = parse_reminder_text(
+                            f"me lembre de {pending_reminder['message']} {message}"
+                        )
+                    except ValueError:
+                        reminder = None
+                    if reminder:
+                        await self.repository.add_reminder(
+                            phone,
+                            reminder,
+                            source_message_id=pending_reminder["source_message_id"],
+                        )
+                        await self.repository.complete_pending_reminder(pending_reminder["id"])
+                        return FinanceResult(
+                            self._with_welcome(
+                                f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{reminder.message}*.",
+                                first_message,
+                            ),
+                            None,
+                        )
+                if self._is_reminder_day_follow_up(normalized):
+                    return FinanceResult(
+                        self._with_welcome(
+                            "⏰ Perfeito. Qual horário devo usar? Exemplo: *18:30*.",
+                            first_message,
+                        ),
+                        None,
+                    )
+
             pending = await self.repository.get_pending_confirmation(phone)
             correction_text = self._correction_text(normalized)
             if pending and correction_text is not None:
@@ -134,6 +170,8 @@ class FinanceService:
                 return FinanceResult(self._with_welcome(reply, first_message), None)
 
             if self._is_reminder_request(normalized):
+                has_schedule = self._has_explicit_reminder_schedule(message)
+                reminder_from_hermes = False
                 try:
                     reminder = parse_reminder_text(message)
                 except ValueError:
@@ -149,7 +187,19 @@ class FinanceService:
                             None,
                         )
                     reminder = self._reminder_from_hermes(interpreted)
+                    reminder_from_hermes = reminder is not None
                     if reminder is None:
+                        reminder_text = str(interpreted.get("reminder_text") or "").strip()
+                        if reminder_text and not self._is_date_only_reminder(reminder_text):
+                            await self.repository.save_pending_reminder(phone, reminder_text, message_id)
+                            return FinanceResult(
+                                self._with_welcome(
+                                    "⏰ Entendi o que você quer lembrar. Para quando devo agendar? "
+                                    "Exemplo: *hoje às 18:30*.",
+                                    first_message,
+                                ),
+                                None,
+                            )
                         return FinanceResult(
                             self._with_welcome(
                                 str(interpreted.get("reply") or "⏰ Diga o que devo lembrar e para quando."),
@@ -157,6 +207,16 @@ class FinanceService:
                             ),
                             None,
                         )
+                if not has_schedule and not reminder_from_hermes:
+                    await self.repository.save_pending_reminder(phone, reminder.message, message_id)
+                    return FinanceResult(
+                        self._with_welcome(
+                            "⏰ O que você quer lembrar já ficou anotado. Para quando devo agendar? "
+                            "Exemplo: *hoje às 18:30*.",
+                            first_message,
+                        ),
+                        None,
+                    )
                 await self.repository.add_reminder(phone, reminder, source_message_id=message_id)
                 return FinanceResult(self._with_welcome(f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{reminder.message}*.", first_message), None)
 
@@ -243,8 +303,18 @@ class FinanceService:
                     if interpreted.get("amount") is not None:
                         await self.repository.save_confirmation(phone, confirmation_id, interpreted)
                     return FinanceResult(f"🤔 Posso registrar *{interpreted.get('description') or 'este lançamento'}* de *{self._money(float(interpreted.get('amount') or 0))}*. Responda *confirmar* ou *cancelar*.", None)
-                if interpreted["intent"] not in {"create_expense", "create_income"} or interpreted.get("amount") is None:
-                    raise
+                if (
+                    interpreted["intent"] not in {"create_expense", "create_income"}
+                    or interpreted.get("amount") is None
+                    or not self._is_clear_transaction_message(normalized)
+                ):
+                    if interpreted.get("reply"):
+                        return FinanceResult(str(interpreted["reply"]), None)
+                    return FinanceResult(
+                        "🤔 Posso registrar gastos quando você me disser claramente o que foi pago ou comprado. "
+                        "Não registrei nada nesta mensagem.",
+                        None,
+                    )
                 transaction = TransactionDraft(
                     "income" if interpreted["intent"] == "create_income" else "expense",
                     float(interpreted["amount"]),
@@ -318,6 +388,32 @@ class FinanceService:
         return values
 
     @staticmethod
+    def _has_explicit_reminder_schedule(message: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:\b(?:em|daqui\s+a)\s*\d+\s*(?:minutos?|mins?|m|horas?|h|dias?|d)\s*$|"
+                r"\b(?:(?:hoje|amanhã|amanha)\s+)?(?:às|as|para|pra)\s+\d{1,2}(?:(?::|h)\d{2})?\s*(?:horas?|h)?(?:\s+da\s+(?:manhã|manha|tarde|noite))?\s*$|"
+                r"\b\d{1,2}(?::|h)\d{2}\s*$)",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _is_reminder_day_follow_up(message: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:hoje|amanhã|amanha)(?:\s+(?:de|pela)\s+(?:manhã|manha|tarde|noite))?",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _is_date_only_reminder(message: str) -> bool:
+        return bool(re.fullmatch(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", message.strip()))
+
+    @staticmethod
     def _reminder_from_hermes(data: dict[str, object]) -> ReminderDraft | None:
         if data.get("intent") != "create_reminder":
             return None
@@ -349,7 +445,7 @@ class FinanceService:
     def _is_reminder_request(message: str) -> bool:
         return bool(
             re.search(
-                r"\b(?:lembrete|lembrar|lembre|avise|avisa)\b",
+                r"\b(?:lembrete|lembrar|lembre|lembra|avise|avisa)\b",
                 message,
                 re.IGNORECASE,
             )
@@ -544,13 +640,22 @@ class FinanceService:
     def _welcome_message() -> str:
         return (
             "👋 Oi! Eu sou o *Cofrin*, seu assistente financeiro 💰\n\n"
-            "Posso registrar gastos e receitas, consultar seus números e montar resumos.\n\n"
-            "Experimente:\n"
-            "• *Gastei R$ 32 no almoço*\n"
-            "• *Quanto gastei este mês?*\n"
-            "• *Quantas despesas eu tenho?*\n"
-            "• *Gere meu relatório*\n\n"
-            "Pode falar comigo de forma natural 😊"
+            "Pode falar comigo de forma natural — não precisa decorar comandos.\n\n"
+            "*Como eu funciono:*\n"
+            "• Texto: registro gastos e receitas.\n"
+            "• Áudio: transcrevo sua mensagem e interpreto o pedido.\n"
+            "• Imagem: leio comprovantes e tento identificar valor, categoria e pagamento.\n"
+            "• Perguntas: consulto totais, períodos, categorias e recorrências.\n"
+            "• Lembretes: aceito minutos, horas, dias e horários, como *hoje às 18:30*.\n"
+            "• Dúvidas: quando faltar informação, pergunto antes de gravar.\n\n"
+            "*Exemplos:*\n"
+            "• *Gastei R$ 32 no almoço via Pix*\n"
+            "• *Quanto gastei com alimentação este mês?*\n"
+            "• *Me lembre de pagar a conta em 10 minutos*\n"
+            "• *Criar lembrete de revisar o orçamento às 18:30*\n"
+            "• *Consultar pagamentos recorrentes*\n\n"
+            "Se eu interpretar um lançamento com dúvida, vou pedir sua confirmação. "
+            "Você também pode corrigir a categoria depois. 😊"
         )
 
     @staticmethod

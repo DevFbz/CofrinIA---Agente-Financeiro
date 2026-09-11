@@ -80,6 +80,23 @@ def test_parses_natural_reminder_without_space_in_time_unit():
     assert result.due_at == datetime(2026, 9, 10, 18, 30, tzinfo=timezone(timedelta(hours=-3)))
 
 
+def test_rejects_reminder_that_contains_only_a_date_as_message():
+    with pytest.raises(ValueError, match="lembrar"):
+        parse_reminder_text("Lembrar 11/09 às 18:30 da noite")
+
+
+def test_removes_day_word_when_transcription_has_punctuation_before_time():
+    now = datetime(2026, 9, 10, 20, 0, tzinfo=timezone(timedelta(hours=-3)))
+
+    result = parse_reminder_text(
+        "É, me lembre de revisar o orçamento hoje, às 7h32.",
+        now=now,
+    )
+
+    assert result.message == "revisar o orçamento"
+    assert result.due_at == datetime(2026, 9, 11, 7, 32, tzinfo=timezone(timedelta(hours=-3)))
+
+
 def test_rejects_invalid_recurring_day():
     with pytest.raises(ValueError, match="dia"):
         parse_recurring_text("aluguel de R$ 1.000 todo dia 35")

@@ -129,6 +129,7 @@ O repositório executa `metadata.create_all` na inicialização e aplica altera�
 
 ```text
 conversation_messages
+pending_reminders
 pending_confirmations
 delivery_records
 ```

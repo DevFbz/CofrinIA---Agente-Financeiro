@@ -83,13 +83,19 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
         current = current.replace(tzinfo=brazil)
     else:
         current = current.astimezone(brazil)
+    cleaned_text = re.sub(
+        r"^(?:(?:é|e|então|entao|bom|olha)\s*[,;:]?\s*)+",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
     prefix = re.match(
-        r"^(?:me\s+lembre|lembre[- ]me|me\s+lembrar|lembrar|"
+        r"^(?:me\s+lembre|me\s+lembra|lembre[- ]me|me\s+lembrar|lembrar|lembra|"
         r"criar\s+(?:um\s+)?lembrete|lembrete|"
         r"(?:pode\s+)?me\s+lembrar|me\s+avise|avise[- ]me|"
         r"quero\s+que\s+me\s+lembre)"
         r"(?:\s+(?:de|para|que))?\s*(?P<body>.+)$",
-        text.strip(),
+        cleaned_text,
         re.IGNORECASE,
     )
     if not prefix:
@@ -117,12 +123,19 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
         return ReminderDraft(message, current + delta)
 
     absolute = re.search(
-        r"\s+(?:(?P<day>hoje|amanhã|amanha)\s+)?(?:às|as)\s+"
+        r"\s+(?:(?P<day>hoje|amanhã|amanha)\s*[,;]?\s+)?"
+        r"(?:(?P<marker>às|as|para|pra)\s+)?"
         r"(?P<hour>\d{1,2})(?:(?::|h)(?P<minute>\d{2}))?\s*"
-        r"(?:horas?|h)?(?:\s+da\s+(?P<period>manhã|manha|tarde|noite))?\s*$",
+        r"(?P<clock_unit>horas?|h)?(?:\s+da\s+(?P<period>manhã|manha|tarde|noite))?\s*$",
         body,
         re.IGNORECASE,
     )
+    if absolute and not (
+        absolute.group("marker")
+        or absolute.group("minute")
+        or absolute.group("clock_unit")
+    ):
+        absolute = None
     if absolute:
         hour = int(absolute.group("hour"))
         minute = int(absolute.group("minute") or 0)
@@ -136,6 +149,8 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
         elif period in {"manhã", "manha"} and hour == 12:
             hour = 0
         message = body[: absolute.start()].strip(" .,!?:;")
+        if re.fullmatch(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", message):
+            raise ValueError("informe o que devo lembrar")
         target_date = current.date()
         day = (absolute.group("day") or "").casefold()
         if day in {"amanhã", "amanha"}:
@@ -145,4 +160,6 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
             due_at += timedelta(days=1)
         return ReminderDraft(message, due_at)
 
+    if re.fullmatch(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", body):
+        raise ValueError("informe o que devo lembrar")
     return ReminderDraft(body, current + timedelta(hours=3))

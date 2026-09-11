@@ -80,6 +80,9 @@ async def test_first_message_introduces_assistant_and_teaches_basic_commands(ser
     assert result.transaction is None
     assert result.reply.count("Eu sou o *Cofrin*") == 1
     assert "Gastei R$ 32 no almoço" in result.reply
+    assert "áudio" in result.reply.lower()
+    assert "imagem" in result.reply.lower()
+    assert "confirmação" in result.reply.lower()
 
 
 @pytest.mark.asyncio
@@ -373,6 +376,49 @@ async def test_incomplete_reminder_request_asks_for_details(service):
 
     assert result.transaction is None
     assert "o que" in result.reply.lower()
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_reminder_follow_up_completes_pending_request(service):
+    phone = "5511999030017"
+
+    first = await service.process_message(
+        "Me lembra de comprar presente da Duda",
+        phone=phone,
+        message_id="pending-reminder-1",
+    )
+    assert "quando" in first.reply.lower()
+
+    pending = await service.repository.get_pending_reminder(phone)
+    assert pending["message"] == "comprar presente da Duda"
+
+    day = await service.process_message(
+        "Hoje",
+        phone=phone,
+        message_id="pending-reminder-2",
+    )
+    assert "qual horário" in day.reply.lower()
+
+    second = await service.process_message(
+        "18:30",
+        phone=phone,
+        message_id="pending-reminder-3",
+    )
+
+    assert "Lembrete criado" in second.reply
+    assert await service.repository.get_pending_reminder(phone) is None
+    reminders = await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=2))
+    assert reminders[-1]["source_message_id"] == "pending-reminder-1"
+
+
+@pytest.mark.asyncio
+async def test_reserve_money_phrase_is_not_registered_as_expense(service):
+    phone = "5511999030018"
+
+    result = await service.process_message("Separar 10 reais pra ida até Botafogo", phone=phone)
+
+    assert result.transaction is None
     assert await service.repository.count_expenses(phone) == (0, 0)
 
 

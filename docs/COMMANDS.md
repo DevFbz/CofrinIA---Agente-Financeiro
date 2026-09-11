@@ -104,11 +104,16 @@ Comprei uma TV de R$ 2.400 em 12 vezes no cartão
 Me lembre de pagar a conta daqui a 10 minutos
 Lembre-me de ligar para o banco em 5 horas
 Me lembre de revisar o orçamento em 2 dias
-Criar lembrete de revisar o robô às 18:30 horas
+
+Me lembre de comprar uma capa para telefone
+Hoje
+18:30
+
+Criar lembrete de revisar o orçamento às 18:30 horas
 Lembrar de fazer atualização amanhã às 8h30
 ```
 
-Também são aceitas formas sem espaço, como `10minutos`. Quando nenhuma duração é informada, o padrão é de 3 horas.
+Para um lembrete em duas mensagens, o bot guarda o que deve ser lembrado, pergunta o horário e aceita respostas como `Hoje` e depois `18:30`. Também entende formas sem espaço, como `10minutos`. Se a mensagem já informar o horário, o lembrete é criado diretamente. Uma mensagem que contenha apenas uma data, sem o que lembrar, gera uma pergunta em vez de criar um registro.
 
 ## Áudio
 
