@@ -100,6 +100,34 @@ async def test_stale_delivery_claim_can_be_recovered(repository):
 
 
 @pytest.mark.asyncio
+async def test_repeating_reminder_advances_hourly_until_deadline(repository):
+    start = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    task_id = await repository.create_task_and_reminder(
+        "5511999999999",
+        "Comprar o presente",
+        start + timedelta(hours=1),
+        source_message_id="repeat-source-1",
+        repeat_interval_minutes=60,
+        repeat_until=start + timedelta(hours=3),
+    )
+
+    first_due = await repository.due_reminders(start + timedelta(hours=1))
+    reminder_id = first_due[0]["id"]
+    assert first_due[0]["task_id"] == task_id
+    await repository.mark_reminder_sent(reminder_id)
+
+    second_due = await repository.due_reminders(start + timedelta(hours=2))
+    assert second_due[0]["id"] == reminder_id
+    assert second_due[0]["due_at"].replace(tzinfo=UTC) == start + timedelta(hours=2)
+    await repository.mark_reminder_sent(reminder_id)
+
+    final_due = await repository.due_reminders(start + timedelta(hours=3))
+    assert final_due[0]["id"] == reminder_id
+    await repository.mark_reminder_sent(reminder_id)
+    assert await repository.due_reminders(start + timedelta(hours=4)) == []
+
+
+@pytest.mark.asyncio
 async def test_send_reply_includes_native_whatsapp_quote(repository, monkeypatch):
     from app import main
 

@@ -97,6 +97,40 @@ def test_removes_day_word_when_transcription_has_punctuation_before_time():
     assert result.due_at == datetime(2026, 9, 11, 7, 32, tzinfo=timezone(timedelta(hours=-3)))
 
 
+def test_parses_explicit_numeric_date_and_weekday():
+    now = datetime(2026, 9, 12, 9, 0, tzinfo=timezone(timedelta(hours=-3)))
+
+    result = parse_reminder_text(
+        "Criar lembrete para o dia 14/09 segunda-feira às 10:00, criar uma função no marketing",
+        now=now,
+    )
+
+    assert result.message == "criar uma função no marketing"
+    assert result.due_at == datetime(2026, 9, 14, 10, 0, tzinfo=timezone(timedelta(hours=-3)))
+
+
+def test_parses_explicit_month_name_before_reminder_action():
+    now = datetime(2026, 9, 12, 9, 0, tzinfo=timezone(timedelta(hours=-3)))
+
+    result = parse_reminder_text(
+        "No dia 14 de setembro às 10h, me lembre de revisar o script",
+        now=now,
+    )
+
+    assert result.message == "revisar o script"
+    assert result.due_at == datetime(2026, 9, 14, 10, 0, tzinfo=timezone(timedelta(hours=-3)))
+
+
+def test_rejects_explicit_date_with_inconsistent_weekday():
+    now = datetime(2026, 9, 12, 9, 0, tzinfo=timezone(timedelta(hours=-3)))
+
+    with pytest.raises(ValueError, match="dia da semana"):
+        parse_reminder_text(
+            "Criar lembrete para 14/09 terça-feira às 10:00, revisar o script",
+            now=now,
+        )
+
+
 def test_rejects_invalid_recurring_day():
     with pytest.raises(ValueError, match="dia"):
         parse_recurring_text("aluguel de R$ 1.000 todo dia 35")

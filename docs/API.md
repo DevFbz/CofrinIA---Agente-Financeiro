@@ -104,6 +104,14 @@ Envia lembretes vencidos, marca os envios concluídos e usa `source_message_id` 
 
 Marca um lembrete específico como concluído.
 
+## Tarefas
+
+### `POST /internal/tasks/digest/dispatch`
+
+Envia a lista de tarefas pendentes para cada usuário que possui tarefas. O workflow do n8n deve chamar este endpoint diariamente às `17:00`, usando o fuso `America/Sao_Paulo` e o header `X-Internal-Token`. A chave idempotente é `tasks:daily:{phone}:{YYYY-MM-DD}`.
+
+Uma tarefa é criada junto com cada lembrete. Pedidos sem data e horário criam uma tarefa pendente e um lembrete recorrente a cada 60 minutos, com término após 48 horas. O usuário pode responder `parar lembrete` ou `concluir tarefa` para interromper as notificações.
+
 ## Recorrências e parcelas
 
 ### `POST /internal/recurring/generate`

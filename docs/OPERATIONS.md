@@ -130,11 +130,12 @@ O repositório executa `metadata.create_all` na inicialização e aplica altera�
 ```text
 conversation_messages
 pending_reminders
+tasks
 pending_confirmations
 delivery_records
 ```
 
-A tabela `reminders` também deve conter `source_message_id` para permitir que o disparo seja enviado como reply da mensagem que criou o lembrete.
+A tabela `reminders` também deve conter `source_message_id`, `task_id`, `repeat_interval_minutes`, `repeat_until` e `cancelled`. Essas colunas permitem reply da mensagem original, recorrência horária e cancelamento persistente. A tabela `tasks` guarda o texto pedido pelo usuário, por exemplo `Comprar o presente da Duda`.
 
 A criação e as alterações de schema devem ser idempotentes e nunca devem usar `DROP`, `TRUNCATE` ou recriação de volume em um deploy comum.
 
@@ -155,7 +156,20 @@ A cada ciclo ele:
 
 O intervalo padrão é de 60 segundos e pode ser ajustado por `WORKER_INTERVAL_SECONDS`, respeitando o mínimo de 10 segundos.
 
-O worker não envia lembretes diretamente. O dispatch de lembretes é executado pelo workflow agendado do n8n, que chama `POST /internal/reminders/dispatch` com `X-Internal-Token`. O endpoint usa `delivery_records` para impedir duplicidade.
+O worker não envia lembretes de usuário diretamente. O dispatch de lembretes é executado pelo workflow agendado do n8n, que chama `POST /internal/reminders/dispatch` com `X-Internal-Token`. O endpoint usa `delivery_records` para impedir duplicidade. Para lembretes sem data e horário, o registro avança uma ocorrência de 60 minutos após cada envio e encerra em 48 horas.
+
+O worker também possui uma salvaguarda: quando seu ciclo roda às `17:00` em `America/Sao_Paulo`, chama internamente `POST /internal/tasks/digest/dispatch`. Isso garante o resumo diário mesmo sem um workflow n8n dedicado; se ambos executarem, a chave diária impede duplicidade.
+
+## Lista de tarefas às 17:00
+
+Crie no n8n um workflow com nó Cron configurado para `17:00`, timezone `America/Sao_Paulo`, chamando:
+
+```text
+POST /internal/tasks/digest/dispatch
+Header: X-Internal-Token
+```
+
+O endpoint envia somente para usuários com tarefas pendentes. A chave `tasks:daily:{phone}:{YYYY-MM-DD}` impede duplicidade caso o workflow seja reexecutado. O usuário pode pedir a lista a qualquer momento pelo WhatsApp ou responder `parar lembrete`/`concluir tarefa`.
 
 ## Idempotência e entrega
 

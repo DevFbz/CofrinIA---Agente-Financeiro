@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="CofrinIA Hermes Bridge", version="1.2.0")
+app = FastAPI(title="CofrinIA Hermes Bridge", version="1.3.0")
 HERMES_PYTHON = "/home/hermes/.hermes/hermes-agent/venv/bin/python"
 _ALLOWED_INTENTS = {
     "create_expense",
@@ -97,7 +97,7 @@ Regras de intenção:
 - create_expense/create_income: lançamento explícito com valor. Use amount numérico em reais.
 - create_installment: compra parcelada explicitamente mencionada.
 - create_recurring: criação explícita de uma despesa recorrente, com valor e periodicidade.
-- create_reminder: pedido para lembrar algo. Use reminder_text com o que deve ser lembrado e reminder_schedule com a expressão de tempo original, como "às 18:30", "em 10 minutos" ou "amanhã às 8". Não calcule due_at e não invente data ou horário.
+- create_reminder: pedido para lembrar algo. Use reminder_text somente com a tarefa, sem data, horário ou dia da semana. Preserve em reminder_schedule a expressão original completa, como "14/09/2026 segunda-feira às 10:00", "14 de setembro às 10h", "às 18:30", "em 10 minutos" ou "amanhã às 8". Não calcule due_at, não troque a data pelo dia seguinte e não invente data ou horário.
 - query_summary: pergunta sobre total, resumo, gastos ou despesas em um período.
 - query_category: pergunta sobre gastos de uma categoria específica, como alimentação, transporte, saúde, moradia ou lazer.
 - list_recurring: pedido para listar ou consultar pagamentos/despesas recorrentes. "Pagamento recorrente", "consultar pagamentos recorrentes" e "ver meus pagamentos" entram aqui.
@@ -111,7 +111,7 @@ Regras de segurança:
 - Valores aproximados, incertos ou contraditórios exigem requires_confirmation=true apenas para criação de movimentações.
 - category deve ser uma chave sem acento: alimentacao, transporte, moradia, lazer, saude, salario ou outros.
 - Para consultas, lembretes, help e unknown, amount deve ser null e requires_confirmation deve ser false.
-- Se faltar o que ou quando no pedido de lembrete, use create_reminder com o campo ausente como null e escreva uma pergunta cordial em reply.
+- Se faltar somente o horário, preserve a data em reminder_schedule ou reminder_text e deixe o horário ausente para o backend pedir a informação. Se faltarem data e horário, use create_reminder com reminder_text preenchido e reminder_schedule=null; o backend criará notificações de hora em hora por 48 horas e explicará como parar.
 - Responda sempre em português brasileiro, com tom humano, claro e breve.
 
 Histórico recente:

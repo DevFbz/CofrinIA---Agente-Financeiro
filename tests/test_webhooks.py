@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -139,3 +140,98 @@ def test_audio_message_is_transcribed_and_sent_to_finance(monkeypatch):
     assert response.status_code == 200
     assert response.json()["status"] == "processed"
     assert transcribed and sent[0][0][1] == "✅ Despesa registrada"
+
+
+def test_task_digest_dispatch_sends_pending_tasks_only(monkeypatch):
+    from app import main
+
+    class FakeRepository:
+        async def list_user_phones(self):
+            return ["5511999999001", "5511999999002"]
+
+        async def list_tasks(self, phone):
+            return [{"id": 1, "title": "Comprar o presente"}] if phone.endswith("001") else []
+
+    class FakeService:
+        repository = FakeRepository()
+
+        async def initialize(self):
+            return None
+
+    sent = []
+
+    async def fake_send_reply(*args, **kwargs):
+        sent.append((args, kwargs))
+        return True
+
+    original_service = main.finance_service
+    original_send = main._send_reply
+    main.finance_service = FakeService()
+    main._send_reply = fake_send_reply
+    monkeypatch.setenv("COFRIN_INTERNAL_TOKEN", "test-token")
+    try:
+        response = TestClient(app).post(
+            "/internal/tasks/digest/dispatch",
+            headers={"x-internal-token": "test-token"},
+        )
+    finally:
+        main.finance_service = original_service
+        main._send_reply = original_send
+
+    assert response.status_code == 200
+    assert response.json()["processed"] == 1
+    assert response.json()["skipped"] == ["5511999999002"]
+    assert sent[0][0][1].startswith("📋 *Sua lista de tarefas*")
+    assert "Comprar o presente" in sent[0][0][1]
+
+
+def test_repeating_reminder_dispatch_includes_stop_option_and_occurrence_key(monkeypatch):
+    from app import main
+
+    due_at = datetime(2026, 9, 14, 13, 0, tzinfo=UTC)
+
+    class FakeRepository:
+        async def due_reminders(self, now):
+            return [{
+                "id": 7,
+                "phone": "5511999999001",
+                "message": "Comprar o presente",
+                "due_at": due_at,
+                "source_message_id": "source-7",
+                "repeat_interval_minutes": 60,
+                "repeat_until": datetime(2026, 9, 16, 13, 0, tzinfo=UTC),
+                "cancelled": False,
+            }]
+
+        async def mark_reminder_sent(self, reminder_id, sent_at=None):
+            return None
+
+    class FakeService:
+        repository = FakeRepository()
+
+        async def initialize(self):
+            return None
+
+    sent = []
+
+    async def fake_send_reply(*args, **kwargs):
+        sent.append((args, kwargs))
+        return True
+
+    original_service = main.finance_service
+    original_send = main._send_reply
+    main.finance_service = FakeService()
+    main._send_reply = fake_send_reply
+    monkeypatch.setenv("COFRIN_INTERNAL_TOKEN", "test-token")
+    try:
+        response = TestClient(app).post(
+            "/internal/reminders/dispatch",
+            headers={"x-internal-token": "test-token"},
+        )
+    finally:
+        main.finance_service = original_service
+        main._send_reply = original_send
+
+    assert response.status_code == 200
+    assert "parar lembrete" in sent[0][0][1].lower()
+    assert sent[0][0][2] == "reminder:7:2026-09-14T13:00:00+00:00"

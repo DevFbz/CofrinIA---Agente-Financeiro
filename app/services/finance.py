@@ -69,6 +69,43 @@ class FinanceService:
     async def close(self) -> None:
         await self.repository.close()
 
+    @staticmethod
+    def _task_title(message: str) -> str:
+        title = re.sub(r"\s+", " ", (message or "").strip(" .,!?:;\t"))
+        return title[:1].upper() + title[1:]
+
+    async def _create_reminder_task(
+        self,
+        phone: str,
+        reminder: ReminderDraft,
+        source_message_id: str | None,
+        recurring: bool = False,
+    ) -> tuple[int, str]:
+        title = self._task_title(reminder.message)
+        if recurring:
+            now = datetime.now(BRAZIL_TIMEZONE)
+            task_id = await self.repository.create_task_and_reminder(
+                phone,
+                title,
+                now + timedelta(hours=1),
+                source_message_id=source_message_id,
+                repeat_interval_minutes=60,
+                repeat_until=now + timedelta(days=2),
+            )
+            return task_id, (
+                f"✅ Tarefa adicionada: *{title}*.\n\n"
+                "Vou lembrar você a cada 1 hora durante 2 dias.\n"
+                "Para parar, responda *parar lembrete*. "
+                "Para ver suas tarefas, peça *minha lista de tarefas*."
+            )
+        task_id = await self.repository.create_task_and_reminder(
+            phone,
+            title,
+            reminder.due_at,
+            source_message_id=source_message_id,
+        )
+        return task_id, f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{title}*."
+
     async def process_message(
         self,
         message: str,
@@ -90,6 +127,54 @@ class FinanceService:
             await self.repository.expire_pending_confirmations(datetime.now(UTC))
 
             await self.repository.expire_pending_reminders(datetime.now(UTC))
+            if self._is_stop_reminder_request(normalized):
+                cancelled = await self.repository.cancel_active_reminders(phone)
+                pending_reminder = await self.repository.get_pending_reminder(phone)
+                if pending_reminder:
+                    await self.repository.complete_pending_reminder(pending_reminder["id"], "cancelled")
+                if cancelled or pending_reminder:
+                    return FinanceResult(
+                        self._with_welcome(
+                            "🛑 Parei os lembretes ativos. A tarefa continua disponível na sua lista; "
+                            "quando concluir, peça *concluir tarefa* ou *já fiz*.",
+                            first_message,
+                        ),
+                        None,
+                    )
+                return FinanceResult(
+                    self._with_welcome("ℹ️ Não encontrei lembretes ativos para parar.", first_message),
+                    None,
+                )
+            if self._is_task_list_query(normalized):
+                tasks = await self.repository.list_tasks(phone)
+                if not tasks:
+                    reply = "📋 Você não tem tarefas pendentes."
+                else:
+                    lines = [f"{index}. {task['title']}" for index, task in enumerate(tasks, start=1)]
+                    reply = (
+                        "📋 *Sua lista de tarefas*\n\n"
+                        + "\n".join(lines)
+                        + "\n\nPara concluir: *concluir tarefa 1*.\n"
+                        "Para parar lembretes: *parar lembrete*."
+                    )
+                return FinanceResult(self._with_welcome(reply, first_message), None)
+            if self._is_complete_task_request(normalized):
+                task_match = re.search(r"(?:tarefa\s*)?(\d+)\b", normalized)
+                task_id = None
+                if task_match:
+                    task_index = int(task_match.group(1))
+                    task_id = -1
+                    tasks = await self.repository.list_tasks(phone)
+                    if 1 <= task_index <= len(tasks):
+                        task_id = tasks[task_index - 1]["id"]
+                completed = await self.repository.complete_task(phone, task_id)
+                if completed:
+                    return FinanceResult(
+                        self._with_welcome(f"✅ Marquei {completed} tarefa(s) como concluída(s) e parei seus lembretes.", first_message),
+                        None,
+                    )
+                return FinanceResult(self._with_welcome("ℹ️ Não encontrei tarefa pendente para concluir.", first_message), None)
+
             pending_reminder = await self.repository.get_pending_reminder(phone)
             if pending_reminder:
                 if normalized in {"cancelar", "cancela", "não", "nao"}:
@@ -103,15 +188,15 @@ class FinanceService:
                     except ValueError:
                         reminder = None
                     if reminder:
-                        await self.repository.add_reminder(
+                        await self._create_reminder_task(
                             phone,
                             reminder,
-                            source_message_id=pending_reminder["source_message_id"],
+                            pending_reminder["source_message_id"],
                         )
                         await self.repository.complete_pending_reminder(pending_reminder["id"])
                         return FinanceResult(
                             self._with_welcome(
-                                f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{reminder.message}*.",
+                                f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{self._task_title(reminder.message)}*.",
                                 first_message,
                             ),
                             None,
@@ -191,15 +276,23 @@ class FinanceService:
                     if reminder is None:
                         reminder_text = str(interpreted.get("reminder_text") or "").strip()
                         if reminder_text and not self._is_date_only_reminder(reminder_text):
-                            await self.repository.save_pending_reminder(phone, reminder_text, message_id)
-                            return FinanceResult(
-                                self._with_welcome(
-                                    "⏰ Entendi o que você quer lembrar. Para quando devo agendar? "
-                                    "Exemplo: *hoje às 18:30*.",
-                                    first_message,
-                                ),
-                                None,
+                            if self._has_explicit_reminder_date(message) and not has_schedule:
+                                await self.repository.save_pending_reminder(phone, reminder_text, message_id)
+                                return FinanceResult(
+                                    self._with_welcome(
+                                        "⏰ Entendi a data. Qual horário devo usar? Exemplo: *10:00*.",
+                                        first_message,
+                                    ),
+                                    None,
+                                )
+                            reminder = ReminderDraft(reminder_text, datetime.now(BRAZIL_TIMEZONE))
+                            _, reply = await self._create_reminder_task(
+                                phone,
+                                reminder,
+                                message_id,
+                                recurring=not has_schedule,
                             )
+                            return FinanceResult(self._with_welcome(reply, first_message), None)
                         return FinanceResult(
                             self._with_welcome(
                                 str(interpreted.get("reply") or "⏰ Diga o que devo lembrar e para quando."),
@@ -208,17 +301,19 @@ class FinanceService:
                             None,
                         )
                 if not has_schedule and not reminder_from_hermes:
-                    await self.repository.save_pending_reminder(phone, reminder.message, message_id)
-                    return FinanceResult(
-                        self._with_welcome(
-                            "⏰ O que você quer lembrar já ficou anotado. Para quando devo agendar? "
-                            "Exemplo: *hoje às 18:30*.",
-                            first_message,
-                        ),
-                        None,
+                    _, reply = await self._create_reminder_task(
+                        phone,
+                        reminder,
+                        message_id,
+                        recurring=True,
                     )
-                await self.repository.add_reminder(phone, reminder, source_message_id=message_id)
-                return FinanceResult(self._with_welcome(f"⏰ Lembrete criado para {reminder.due_at.strftime('%d/%m às %H:%M')}: *{reminder.message}*.", first_message), None)
+                    return FinanceResult(self._with_welcome(reply, first_message), None)
+                _, reply = await self._create_reminder_task(
+                    phone,
+                    reminder,
+                    message_id,
+                )
+                return FinanceResult(self._with_welcome(reply, first_message), None)
 
             if self._is_recurring_query(normalized):
                 return FinanceResult(await self._recurring_summary(phone), None)
@@ -388,12 +483,58 @@ class FinanceService:
         return values
 
     @staticmethod
+    def _is_stop_reminder_request(message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:parar|pare|cancelar|cancele|desativar|desative)\b.*\b(?:lembrete|lembre|lembrar|avisos?)\b|"
+                r"\b(?:não|nao)\s+me\s+(?:lembre|avise)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _is_task_list_query(message: str) -> bool:
+        return any(
+            phrase in message
+            for phrase in (
+                "lista de tarefas",
+                "minha lista de tarefas",
+                "minhas tarefas",
+                "tarefas pendentes",
+                "o que tenho para fazer",
+                "o que eu tenho para fazer",
+                "meus lembretes",
+            )
+        )
+
+    @staticmethod
+    def _is_complete_task_request(message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:concluir|concluí|conclui|finalizar|finalizei|feito|já fiz|ja fiz|terminei)\b",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _has_explicit_reminder_date(message: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:dia\s+\d{1,2}\s+de\s+|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|(?:segunda|terça|terca|quarta|quinta|sexta|sábado|sabado|domingo)(?:-feira|\s+feira)?)",
+                message,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def _has_explicit_reminder_schedule(message: str) -> bool:
         return bool(
             re.search(
-                r"(?:\b(?:em|daqui\s+a)\s*\d+\s*(?:minutos?|mins?|m|horas?|h|dias?|d)\s*$|"
-                r"\b(?:(?:hoje|amanhã|amanha)\s+)?(?:às|as|para|pra)\s+\d{1,2}(?:(?::|h)\d{2})?\s*(?:horas?|h)?(?:\s+da\s+(?:manhã|manha|tarde|noite))?\s*$|"
-                r"\b\d{1,2}(?::|h)\d{2}\s*$)",
+                r"(?:\b(?:em|daqui\s+a)\s*\d+\s*(?:minutos?|mins?|m|horas?|h|dias?|d)\b|"
+                r"\b(?:(?:hoje|amanhã|amanha)\s*[,;]?\s*)?(?:às|as|para|pra)\s+\d{1,2}(?:(?::|h)\d{2})?\s*(?:horas?|h)?(?:\s+da\s+(?:manhã|manha|tarde|noite))?\b|"
+                r"\b\d{1,2}(?:(?::|h)\d{2})\b)",
                 message,
                 re.IGNORECASE,
             )

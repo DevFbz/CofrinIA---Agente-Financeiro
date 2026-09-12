@@ -8,10 +8,33 @@ from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from app.infrastructure.repository import FinanceRepository
 
 logger = logging.getLogger(__name__)
 BRAZIL_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+
+
+async def dispatch_task_digest_if_due(now: datetime) -> bool:
+    current = now if now.tzinfo else now.replace(tzinfo=UTC)
+    current = current.astimezone(BRAZIL_TIMEZONE)
+    if current.hour != 17:
+        return False
+    token = os.getenv("COFRIN_INTERNAL_TOKEN")
+    if not token:
+        logger.warning("task digest skipped: COFRIN_INTERNAL_TOKEN is not configured")
+        return False
+    endpoint = f"{os.getenv('APP_INTERNAL_URL', 'http://app:8000').rstrip('/')}/internal/tasks/digest/dispatch"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(endpoint, headers={"X-Internal-Token": token})
+            response.raise_for_status()
+        logger.info("task digest dispatch completed")
+        return True
+    except httpx.HTTPError:
+        logger.exception("task digest dispatch failed")
+        return False
 
 
 async def run_once(
@@ -22,6 +45,7 @@ async def run_once(
     await repository.initialize()
     current_day = current_day or datetime.now(BRAZIL_TIMEZONE).date()
     now = now or datetime.now(UTC)
+    await dispatch_task_digest_if_due(now)
     expired = await repository.expire_pending_confirmations(now)
     recurring = await repository.generate_recurring(current_day)
     installments = await repository.generate_installments(current_day)

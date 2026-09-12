@@ -146,6 +146,35 @@ async def dispatch_monthly_reports(x_internal_token: str | None = Header(default
     return {"processed": len(sent), "sent": sent, "failed": failed}
 
 
+async def _dispatch_task_digests() -> dict[str, Any]:
+    today = datetime.now(BRAZIL_TIMEZONE).date()
+    sent, failed, skipped = [], [], []
+    for phone in await finance_service.repository.list_user_phones():
+        tasks = await finance_service.repository.list_tasks(phone)
+        if not tasks:
+            skipped.append(phone)
+            continue
+        lines = [f"{index}. {task['title']}" for index, task in enumerate(tasks, start=1)]
+        digest = (
+            "📋 *Sua lista de tarefas*\n\n"
+            + "\n".join(lines)
+            + "\n\nPara concluir uma tarefa: *concluir tarefa 1*.\n"
+            "Para parar os lembretes: *parar lembrete*."
+        )
+        delivery_key = f"tasks:daily:{phone}:{today.isoformat()}"
+        if await _send_reply(f"{phone}@s.whatsapp.net", digest, delivery_key, "task_digest"):
+            sent.append(phone)
+        else:
+            failed.append(phone)
+    return {"processed": len(sent) + len(failed), "sent": sent, "failed": failed, "skipped": skipped}
+
+
+@app.post("/internal/tasks/digest/dispatch")
+async def dispatch_task_digests(x_internal_token: str | None = Header(default=None)) -> dict[str, Any]:
+    if not _internal_token_is_valid(x_internal_token):
+        raise HTTPException(status_code=401, detail="token interno inválido")
+    await finance_service.initialize()
+    return await _dispatch_task_digests()
 @app.get("/internal/reports/monthly")
 async def monthly_report(phone: str, x_internal_token: str | None = Header(default=None)) -> dict[str, Any]:
     if not _internal_token_is_valid(x_internal_token):
@@ -212,10 +241,22 @@ async def dispatch_due_reminders(x_internal_token: str | None = Header(default=N
     due = await finance_service.repository.due_reminders(datetime.now(UTC))
     sent, failed = [], []
     for reminder in due:
+        repeating = bool(reminder.get("repeat_interval_minutes") and reminder.get("repeat_until"))
+        reminder_text = (
+            f"⏰ Lembrete: {reminder['message']}\n\n"
+            "Para parar este e os demais lembretes, responda *parar lembrete*."
+            if repeating
+            else f"⏰ Lembrete: {reminder['message']}"
+        )
+        delivery_key = (
+            f"reminder:{reminder['id']}:{reminder['due_at'].isoformat()}"
+            if repeating
+            else f"reminder:{reminder['id']}"
+        )
         ok = await _send_reply(
             f"{reminder['phone']}@s.whatsapp.net",
-            f"⏰ Lembrete: {reminder['message']}",
-            f"reminder:{reminder['id']}",
+            reminder_text,
+            delivery_key,
             "reminder",
             quoted_message={
                 "remoteJid": f"{reminder['phone']}@s.whatsapp.net",
@@ -225,7 +266,7 @@ async def dispatch_due_reminders(x_internal_token: str | None = Header(default=N
         )
         (sent if ok else failed).append(reminder["id"])
         if ok:
-            await finance_service.repository.mark_reminder_sent(reminder["id"])
+            await finance_service.repository.mark_reminder_sent(reminder["id"], datetime.now(UTC))
     return {"processed": len(sent), "sent": sent, "failed": failed}
 
 

@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -369,6 +370,22 @@ async def test_natural_reminder_is_not_registered_as_expense(service):
 
 
 @pytest.mark.asyncio
+async def test_explicit_calendar_date_is_persisted_without_shifting_to_next_day(service):
+    phone = "5511999030019"
+
+    result = await service.process_message(
+        "Criar lembrete para o dia 14/09 segunda-feira às 10:00, revisar o script",
+        phone=phone,
+        message_id="calendar-date-1",
+    )
+
+    assert "14/09 às 10:00" in result.reply
+    reminders = await service.repository.list_reminders(phone)
+    assert reminders[0]["due_at"].date().isoformat() == "2026-09-14"
+    assert reminders[0]["due_at"].hour == 10
+
+
+@pytest.mark.asyncio
 async def test_incomplete_reminder_request_asks_for_details(service):
     phone = "5511999030011"
 
@@ -380,7 +397,7 @@ async def test_incomplete_reminder_request_asks_for_details(service):
 
 
 @pytest.mark.asyncio
-async def test_reminder_follow_up_completes_pending_request(service):
+async def test_reminder_without_schedule_starts_hourly_task_flow(service):
     phone = "5511999030017"
 
     first = await service.process_message(
@@ -388,28 +405,12 @@ async def test_reminder_follow_up_completes_pending_request(service):
         phone=phone,
         message_id="pending-reminder-1",
     )
-    assert "quando" in first.reply.lower()
 
-    pending = await service.repository.get_pending_reminder(phone)
-    assert pending["message"] == "comprar presente da Duda"
-
-    day = await service.process_message(
-        "Hoje",
-        phone=phone,
-        message_id="pending-reminder-2",
-    )
-    assert "qual horário" in day.reply.lower()
-
-    second = await service.process_message(
-        "18:30",
-        phone=phone,
-        message_id="pending-reminder-3",
-    )
-
-    assert "Lembrete criado" in second.reply
+    assert "a cada 1 hora" in first.reply
+    assert "parar lembrete" in first.reply.lower()
     assert await service.repository.get_pending_reminder(phone) is None
-    reminders = await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=2))
-    assert reminders[-1]["source_message_id"] == "pending-reminder-1"
+    tasks = await service.repository.list_tasks(phone)
+    assert tasks[0]["title"] == "Comprar presente da Duda"
 
 
 @pytest.mark.asyncio
@@ -519,6 +520,67 @@ async def test_reminder_keeps_source_message_id_for_native_reply(service):
     assert "Lembrete criado" in result.reply
     reminders = await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=1))
     assert reminders[-1]["source_message_id"] == "reminder-source-1"
+
+
+@pytest.mark.asyncio
+async def test_reminder_without_schedule_creates_task_and_hourly_notifications(service, monkeypatch):
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("app.services.finance.datetime", _FrozenDateTime(now))
+    phone = "5511999030031"
+
+    result = await service.process_message(
+        "Me lembre de comprar o presente da Duda",
+        phone=phone,
+        message_id="hourly-reminder-1",
+    )
+
+    assert result.transaction is None
+    assert "a cada 1 hora" in result.reply
+    assert "parar lembrete" in result.reply.lower()
+    tasks = await service.repository.list_tasks(phone)
+    assert tasks[0]["title"] == "Comprar o presente da Duda"
+    reminders = await service.repository.list_reminders(phone)
+    assert reminders[0]["repeat_interval_minutes"] == 60
+    expected_until = (now.astimezone(ZoneInfo("America/Sao_Paulo")) + timedelta(hours=48)).replace(tzinfo=None)
+    assert reminders[0]["repeat_until"] == expected_until
+    assert reminders[0]["task_id"] == tasks[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_task_list_shows_reminder_title_and_cancel_stops_notifications(service):
+    phone = "5511999030032"
+    await service.process_message(
+        "Me lembre de comprar o presente da Duda",
+        phone=phone,
+        message_id="task-list-1",
+    )
+
+    listed = await service.process_message("minha lista de tarefas", phone=phone, message_id="task-list-2")
+    assert "Comprar o presente da Duda" in listed.reply
+
+    cancelled = await service.process_message("parar lembrete", phone=phone, message_id="task-list-3")
+    assert "parei" in cancelled.reply.lower() or "cancel" in cancelled.reply.lower()
+    assert await service.repository.list_tasks(phone) == []
+    assert await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=3)) == []
+
+
+@pytest.mark.asyncio
+async def test_complete_task_uses_the_number_shown_in_task_list(service):
+    phone = "5511999030033"
+    await service.process_message("Me lembre de comprar o presente da Duda", phone=phone, message_id="task-complete-1")
+
+    result = await service.process_message("concluir tarefa 1", phone=phone, message_id="task-complete-2")
+
+    assert "concluída" in result.reply.lower()
+    assert await service.repository.list_tasks(phone) == []
+
+
+class _FrozenDateTime:
+    def __init__(self, value):
+        self.value = value
+
+    def now(self, tz=None):
+        return self.value.astimezone(tz) if tz else self.value.replace(tzinfo=None)
 
 
 @pytest.mark.asyncio

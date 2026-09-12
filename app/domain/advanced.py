@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 
@@ -83,24 +83,47 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
         current = current.replace(tzinfo=brazil)
     else:
         current = current.astimezone(brazil)
+
     cleaned_text = re.sub(
         r"^(?:(?:é|e|então|entao|bom|olha)\s*[,;:]?\s*)+",
         "",
         text.strip(),
         flags=re.IGNORECASE,
     )
-    prefix = re.match(
-        r"^(?:me\s+lembre|me\s+lembra|lembre[- ]me|me\s+lembrar|lembrar|lembra|"
+    action = re.search(
+        r"(?:me\s+lembre|me\s+lembra|lembre[- ]me|me\s+lembrar|lembrar|lembra|"
         r"criar\s+(?:um\s+)?lembrete|lembrete|"
         r"(?:pode\s+)?me\s+lembrar|me\s+avise|avise[- ]me|"
-        r"quero\s+que\s+me\s+lembre)"
-        r"(?:\s+(?:de|para|que))?\s*(?P<body>.+)$",
+        r"quero\s+que\s+me\s+lembre)",
         cleaned_text,
         re.IGNORECASE,
     )
-    if not prefix:
+    if not action:
         raise ValueError("informe o que devo lembrar")
-    body = prefix.group("body").strip(" .!?\t")
+
+    before_action = cleaned_text[: action.start()].strip(" ,;:.")
+    after_action = cleaned_text[action.end() :].strip(" .!?\t")
+    if before_action and not re.search(
+        r"\b(?:dia|às|as|em|daqui\s+a|hoje|amanhã|amanha|"
+        r"segunda(?:-feira|\s+feira)?|terça(?:-feira|\s+feira)?|terca(?:-feira|\s+feira)?|"
+        r"quarta(?:-feira|\s+feira)?|quinta(?:-feira|\s+feira)?|sexta(?:-feira|\s+feira)?|"
+        r"sábado|sabado|domingo)\b|\d{1,2}[:/]\d{1,2}",
+        before_action,
+        re.IGNORECASE,
+    ):
+        raise ValueError("informe o que devo lembrar")
+    after_action = re.sub(
+        r"^(?:(?:de|para|que)\s+)(?:o\s+)?",
+        "",
+        after_action,
+        flags=re.IGNORECASE,
+    ).strip()
+    if before_action:
+        schedule_source = before_action
+        body = after_action
+    else:
+        schedule_source = after_action
+        body = after_action
     if not body:
         raise ValueError("informe o que devo lembrar")
 
@@ -122,24 +145,83 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
             delta = timedelta(hours=quantity)
         return ReminderDraft(message, current + delta)
 
-    absolute = re.search(
-        r"\s+(?:(?P<day>hoje|amanhã|amanha)\s*[,;]?\s+)?"
-        r"(?:(?P<marker>às|as|para|pra)\s+)?"
-        r"(?P<hour>\d{1,2})(?:(?::|h)(?P<minute>\d{2}))?\s*"
-        r"(?P<clock_unit>horas?|h)?(?:\s+da\s+(?P<period>manhã|manha|tarde|noite))?\s*$",
-        body,
+    month_names = {
+        "janeiro": 1,
+        "fevereiro": 2,
+        "março": 3,
+        "marco": 3,
+        "abril": 4,
+        "maio": 5,
+        "junho": 6,
+        "julho": 7,
+        "agosto": 8,
+        "setembro": 9,
+        "outubro": 10,
+        "novembro": 11,
+        "dezembro": 12,
+    }
+    weekday_names = {
+        "segunda-feira": 0,
+        "segunda feira": 0,
+        "terça-feira": 1,
+        "terca-feira": 1,
+        "terça feira": 1,
+        "terca feira": 1,
+        "quarta-feira": 2,
+        "quarta feira": 2,
+        "quinta-feira": 3,
+        "quinta feira": 3,
+        "sexta-feira": 4,
+        "sexta feira": 4,
+        "sábado": 5,
+        "sabado": 5,
+        "domingo": 6,
+    }
+    month_pattern = "|".join(sorted(month_names, key=len, reverse=True))
+    weekday_pattern = "|".join(sorted(weekday_names, key=len, reverse=True))
+    date_pattern = re.compile(
+        rf"(?:\b(?:no\s+)?dia\s+)?(?P<day>\d{{1,2}})\s*(?:/|-|de\s+)\s*"
+        rf"(?P<month_num>\d{{1,2}})(?:\s*(?:/|-)\s*(?P<year_num>\d{{2,4}}))?"
+        rf"|(?:\b(?:no\s+)?dia\s+)?(?P<day_name>\d{{1,2}})\s+de\s+(?P<month_name>{month_pattern})"
+        rf"(?:\s+de\s+(?P<year_name>\d{{4}}))?",
         re.IGNORECASE,
     )
-    if absolute and not (
-        absolute.group("marker")
-        or absolute.group("minute")
-        or absolute.group("clock_unit")
-    ):
-        absolute = None
-    if absolute:
-        hour = int(absolute.group("hour"))
-        minute = int(absolute.group("minute") or 0)
-        period = (absolute.group("period") or "").casefold()
+    # The first alternative above is numeric day/month; the second is month name.
+    date_match = date_pattern.search(schedule_source)
+    if not date_match and schedule_source is not body:
+        date_match = date_pattern.search(body)
+
+    time_pattern = re.compile(
+        r"(?:(?P<marker>às|as|para|pra)\s+)?"
+        r"(?P<hour>\d{1,2})"
+        r"(?:(?::|h)(?P<minute>\d{2})|(?P<hour_suffix>h))?"
+        r"(?:\s+(?P<clock_unit>horas?))?"
+        r"(?:\s+da\s+(?P<period>manhã|manha|tarde|noite))?",
+        re.IGNORECASE,
+    )
+    time_match = None
+    for candidate in time_pattern.finditer(schedule_source):
+        if candidate.group("marker") or candidate.group("minute") or candidate.group("hour_suffix") or candidate.group("clock_unit") or candidate.group("period"):
+            time_match = candidate
+    if not time_match and schedule_source is not body:
+        for candidate in time_pattern.finditer(body):
+            if candidate.group("marker") or candidate.group("minute") or candidate.group("hour_suffix") or candidate.group("clock_unit") or candidate.group("period"):
+                time_match = candidate
+
+    weekday_match = None
+    weekday_pattern_re = re.compile(rf"(?P<weekday>{weekday_pattern})", re.IGNORECASE)
+    weekday_source = schedule_source if date_match or schedule_source is not body else body
+    weekday_match = weekday_pattern_re.search(weekday_source)
+    named_day_match = None
+    if not date_match and not weekday_match and schedule_source is body and time_match:
+        named_day_match = re.search(r"\b(?P<named_day>hoje|amanhã|amanha)\b", body[: time_match.start()], re.IGNORECASE)
+
+    if date_match or time_match or weekday_match or named_day_match:
+        if not time_match:
+            raise ValueError("informe o horário do lembrete")
+        hour = int(time_match.group("hour"))
+        minute = int(time_match.group("minute") or 0)
+        period = (time_match.group("period") or "").casefold()
         if not 0 <= minute <= 59:
             raise ValueError("os minutos do lembrete devem estar entre 00 e 59")
         if not 0 <= hour <= 23:
@@ -148,15 +230,54 @@ def parse_reminder_text(text: str, now: datetime | None = None) -> ReminderDraft
             hour += 12
         elif period in {"manhã", "manha"} and hour == 12:
             hour = 0
-        message = body[: absolute.start()].strip(" .,!?:;")
-        if re.fullmatch(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", message):
-            raise ValueError("informe o que devo lembrar")
+
         target_date = current.date()
-        day = (absolute.group("day") or "").casefold()
-        if day in {"amanhã", "amanha"}:
-            target_date += timedelta(days=1)
+        explicit_day = ""
+        if date_match:
+            explicit_day = date_match.group("day") or date_match.group("day_name")
+            month_raw = date_match.group("month_num") or date_match.group("month_name")
+            month = int(month_raw) if month_raw.isdigit() else month_names[month_raw.casefold()]
+            year_raw = date_match.group("year_num") or date_match.group("year_name")
+            year = int(year_raw) if year_raw else current.year
+            if year < 100:
+                year += 2000
+            try:
+                target_date = date(year, month, int(explicit_day))
+            except ValueError as exc:
+                raise ValueError("a data do lembrete é inválida") from exc
+            if not year_raw and target_date < current.date():
+                target_date = date(year + 1, month, int(explicit_day))
+            schedule_start = date_match.start()
+            schedule_end = max(date_match.end(), time_match.end())
+        elif weekday_match:
+            desired_weekday = weekday_names[weekday_match.group("weekday").casefold()]
+            days_ahead = (desired_weekday - current.weekday()) % 7
+            target_date = current.date() + timedelta(days=days_ahead)
+            schedule_start = weekday_match.start()
+            schedule_end = max(weekday_match.end(), time_match.end())
+        elif named_day_match:
+            if named_day_match.group("named_day").casefold() in {"amanhã", "amanha"}:
+                target_date += timedelta(days=1)
+            schedule_start = named_day_match.start()
+            schedule_end = time_match.end()
+        else:
+            schedule_start = time_match.start()
+            schedule_end = time_match.end()
+
+        if weekday_match and date_match:
+            expected_weekday = weekday_names[weekday_match.group("weekday").casefold()]
+            if target_date.weekday() != expected_weekday:
+                raise ValueError("a data e o dia da semana não conferem")
+
+        if before_action:
+            message = body
+        else:
+            message = (body[:schedule_start] + " " + body[schedule_end:]).strip(" .,!?:;\t")
+            message = re.sub(r"^(?:para\s+)?(?:o\s+)?$", "", message, flags=re.IGNORECASE).strip()
+        if not message or re.fullmatch(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", message):
+            raise ValueError("informe o que devo lembrar")
         due_at = datetime.combine(target_date, datetime.min.time(), tzinfo=brazil).replace(hour=hour, minute=minute)
-        if due_at <= current and day != "amanhã" and day != "amanha":
+        if due_at <= current and not date_match and not weekday_match:
             due_at += timedelta(days=1)
         return ReminderDraft(message, due_at)
 

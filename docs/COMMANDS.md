@@ -113,7 +113,19 @@ Criar lembrete de revisar o orçamento às 18:30 horas
 Lembrar de fazer atualização amanhã às 8h30
 ```
 
-Para um lembrete em duas mensagens, o bot guarda o que deve ser lembrado, pergunta o horário e aceita respostas como `Hoje` e depois `18:30`. Também entende formas sem espaço, como `10minutos`. Se a mensagem já informar o horário, o lembrete é criado diretamente. Uma mensagem que contenha apenas uma data, sem o que lembrar, gera uma pergunta em vez de criar um registro.
+Se você informar data e horário, o lembrete é criado diretamente. O bot entende datas como `14/09`, `14 de setembro`, `segunda-feira`, além de horários como `10:00`, `10h` e `18:30 da noite`. Se a data e o dia da semana não coincidirem, ele pede correção em vez de deslocar a data.
+
+Quando você pedir para lembrar algo sem informar data nem horário, o bot cria uma tarefa e envia uma notificação a cada 1 hora durante 2 dias. Toda notificação explica como parar. Responda `parar lembrete` para interromper ou `concluir tarefa` quando finalizar.
+
+Também entende formas sem espaço, como `10minutos`. Para ver a lista, envie:
+
+```text
+Minha lista de tarefas
+Minhas tarefas pendentes
+O que tenho para fazer?
+```
+
+No final da tarde, às `17:00` no fuso `America/Sao_Paulo`, o bot envia automaticamente a lista de tarefas pendentes.
 
 ## Áudio
 

@@ -63,6 +63,10 @@ Tudo certo por aqui 😊
 | Relatórios filtrados por categoria | ✅ Implementado |
 | Consulta de pagamentos recorrentes | ✅ Implementado |
 | Lembretes em minutos, horas, dias e horários absolutos | ✅ Implementado |
+| Lembretes automáticos de hora em hora por 48 horas | ✅ Implementado |
+| Lista de tarefas derivada dos lembretes | ✅ Implementado |
+| Cancelamento e conclusão de tarefas por conversa | ✅ Implementado |
+| Resumo diário de tarefas às 17:00 | ✅ Implementado |
 | Integração Evolution API | ✅ Implementado |
 | Transcrição local com faster-whisper | ✅ Implementado |
 | Leitura local de imagem de comprovante com OCR | ✅ Implementado |
@@ -94,12 +98,13 @@ flowchart LR
     P --> V
     V --> S[💼 FinanceService]
     S --> D[(🐘 PostgreSQL)]
+    S --> T[📋 Tarefas + lembretes]
     S --> R[💬 Reply + presença]
     R --> E
     E --> W
     S --> CFM[✅ Confirmação humana]
     CFM --> D
-    A --> WKR[⚙️ Worker]
+    A --> WKR[⚙️ Worker / n8n scheduler]
     WKR --> D
 ```
 

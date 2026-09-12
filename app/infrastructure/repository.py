@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 metadata = MetaData()
+logger = logging.getLogger(__name__)
 
 users = Table(
     "users",
@@ -92,6 +94,10 @@ reminders = Table(
     Column("due_at", DateTime(timezone=True), nullable=False),
     Column("sent", Boolean, nullable=False, default=False),
     Column("source_message_id", String(255), nullable=True),
+    Column("task_id", Integer, nullable=True, index=True),
+    Column("repeat_interval_minutes", Integer, nullable=True),
+    Column("repeat_until", DateTime(timezone=True), nullable=True),
+    Column("cancelled", Boolean, nullable=False, default=False),
 )
 
 pending_reminders = Table(
@@ -106,6 +112,17 @@ pending_reminders = Table(
     Column("expires_at", DateTime(timezone=True), nullable=False),
 )
 
+tasks = Table(
+    "tasks",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("phone", String(32), nullable=False, index=True),
+    Column("title", String(500), nullable=False),
+    Column("status", String(16), nullable=False, default="pending"),
+    Column("source_message_id", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+)
 
 pending_confirmations = Table(
     "pending_confirmations", metadata,
@@ -165,9 +182,16 @@ class FinanceRepository:
             if connection.dialect.name == "postgresql":
                 await connection.execute(
                     text(
-                        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS "
-                        "payment_method VARCHAR(64) NOT NULL DEFAULT 'não informado'"
+                        "CREATE TABLE IF NOT EXISTS tasks ("
+                        "id SERIAL PRIMARY KEY, phone VARCHAR(32) NOT NULL, "
+                        "title VARCHAR(500) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'pending', "
+                        "source_message_id VARCHAR(255), created_at TIMESTAMPTZ NOT NULL, "
+                        "completed_at TIMESTAMPTZ)"
                     )
+                )
+                await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_phone ON tasks (phone)"))
+                await connection.execute(
+                    text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS payment_method VARCHAR(64) NOT NULL DEFAULT 'não informado'")
                 )
             else:
                 try:
@@ -178,7 +202,7 @@ class FinanceRepository:
                         )
                     )
                 except SQLAlchemyError:
-                    pass
+                    logger.warning("schema migration skipped payment_method")
             reminder_column = (
                 "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS source_message_id VARCHAR(255)"
                 if connection.dialect.name == "postgresql"
@@ -187,7 +211,27 @@ class FinanceRepository:
             try:
                 await connection.execute(text(reminder_column))
             except SQLAlchemyError:
-                pass
+                logger.warning("schema migration skipped statement=%s", reminder_column)
+            reminder_columns = (
+                (
+                    "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS task_id INTEGER",
+                    "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_interval_minutes INTEGER",
+                    "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS repeat_until TIMESTAMPTZ",
+                    "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS cancelled BOOLEAN NOT NULL DEFAULT FALSE",
+                )
+                if connection.dialect.name == "postgresql"
+                else (
+                    "ALTER TABLE reminders ADD COLUMN task_id INTEGER",
+                    "ALTER TABLE reminders ADD COLUMN repeat_interval_minutes INTEGER",
+                    "ALTER TABLE reminders ADD COLUMN repeat_until DATETIME",
+                    "ALTER TABLE reminders ADD COLUMN cancelled BOOLEAN NOT NULL DEFAULT 0",
+                )
+            )
+            for statement in reminder_columns:
+                try:
+                    await connection.execute(text(statement))
+                except SQLAlchemyError:
+                    logger.warning("schema migration skipped statement=%s", statement)
             for statement in (
                 "ALTER TABLE users ADD COLUMN salary_cents INTEGER",
                 "ALTER TABLE users ADD COLUMN salary_alert_level INTEGER NOT NULL DEFAULT 0",
@@ -196,7 +240,7 @@ class FinanceRepository:
                 try:
                     await connection.execute(text(statement))
                 except SQLAlchemyError:
-                    pass
+                    logger.warning("schema migration skipped statement=%s", statement)
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -475,7 +519,15 @@ class FinanceRepository:
             spent_result = await session.execute(select(transactions.c.amount_cents).where(transactions.c.phone == phone, transactions.c.type == "expense", transactions.c.category == category, transactions.c.occurred_on >= month_start, transactions.c.occurred_on < next_month))
             return int(limit), sum(spent_result.scalars())
 
-    async def add_reminder(self, phone: str, draft: Any, source_message_id: str | None = None) -> None:
+    async def add_reminder(
+        self,
+        phone: str,
+        draft: Any,
+        source_message_id: str | None = None,
+        task_id: int | None = None,
+        repeat_interval_minutes: int | None = None,
+        repeat_until: datetime | None = None,
+    ) -> None:
         async with self.sessions() as session:
             await session.execute(
                 insert(reminders).values(
@@ -484,9 +536,107 @@ class FinanceRepository:
                     due_at=draft.due_at,
                     sent=False,
                     source_message_id=source_message_id,
+                    task_id=task_id,
+                    repeat_interval_minutes=repeat_interval_minutes,
+                    repeat_until=repeat_until,
+                    cancelled=False,
                 )
             )
             await session.commit()
+
+    async def create_task_and_reminder(
+        self,
+        phone: str,
+        title: str,
+        due_at: datetime,
+        source_message_id: str | None = None,
+        repeat_interval_minutes: int | None = None,
+        repeat_until: datetime | None = None,
+    ) -> int:
+        now = datetime.now(UTC)
+        async with self.sessions() as session:
+            result = await session.execute(
+                insert(tasks)
+                .values(
+                    phone=phone,
+                    title=title[:500],
+                    status="pending",
+                    source_message_id=source_message_id,
+                    created_at=now,
+                )
+                .returning(tasks.c.id)
+            )
+            task_id = int(result.scalar_one())
+            await session.execute(
+                insert(reminders).values(
+                    phone=phone,
+                    message=title[:500],
+                    due_at=due_at,
+                    sent=False,
+                    source_message_id=source_message_id,
+                    task_id=task_id,
+                    repeat_interval_minutes=repeat_interval_minutes,
+                    repeat_until=repeat_until,
+                    cancelled=False,
+                )
+            )
+            await session.commit()
+            return task_id
+
+    async def list_tasks(self, phone: str, status: str = "pending") -> list[dict[str, Any]]:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(tasks)
+                .where(tasks.c.phone == phone, tasks.c.status == status)
+                .order_by(tasks.c.id)
+            )
+            return [dict(row._mapping) for row in result]
+
+    async def list_reminders(self, phone: str) -> list[dict[str, Any]]:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(reminders)
+                .where(reminders.c.phone == phone)
+                .order_by(reminders.c.id)
+            )
+            return [dict(row._mapping) for row in result]
+
+    async def cancel_active_reminders(self, phone: str) -> int:
+        async with self.sessions() as session:
+            active_tasks = select(tasks.c.id).where(tasks.c.phone == phone, tasks.c.status == "pending")
+            reminder_result = await session.execute(
+                reminders.update()
+                .where(reminders.c.phone == phone, reminders.c.cancelled.is_(False), reminders.c.task_id.in_(active_tasks))
+                .values(cancelled=True, sent=True)
+            )
+            await session.execute(
+                tasks.update()
+                .where(tasks.c.phone == phone, tasks.c.status == "pending")
+                .values(status="cancelled", completed_at=datetime.now(UTC))
+            )
+            await session.commit()
+            return reminder_result.rowcount or 0
+
+    async def complete_task(self, phone: str, task_id: int | None = None) -> int:
+        async with self.sessions() as session:
+            condition = [tasks.c.phone == phone, tasks.c.status == "pending"]
+            if task_id is not None:
+                condition.append(tasks.c.id == task_id)
+            result = await session.execute(
+                tasks.update()
+                .where(*condition)
+                .values(status="completed", completed_at=datetime.now(UTC))
+                .returning(tasks.c.id)
+            )
+            completed_ids = [int(value) for value in result.scalars()]
+            if completed_ids:
+                await session.execute(
+                    reminders.update()
+                    .where(reminders.c.task_id.in_(completed_ids))
+                    .values(cancelled=True, sent=True)
+                )
+            await session.commit()
+            return len(completed_ids)
 
     async def save_pending_reminder(self, phone: str, message: str, source_message_id: str | None = None) -> None:
         now = datetime.now(UTC)
@@ -544,12 +694,48 @@ class FinanceRepository:
 
     async def due_reminders(self, now: Any) -> list[dict[str, Any]]:
         async with self.sessions() as session:
-            result = await session.execute(select(reminders).where(reminders.c.due_at <= now, reminders.c.sent.is_(False)))
+            result = await session.execute(
+                select(reminders).where(
+                    reminders.c.due_at <= now,
+                    reminders.c.sent.is_(False),
+                    reminders.c.cancelled.is_(False),
+                )
+            )
             return [dict(row._mapping) for row in result]
 
-    async def mark_reminder_sent(self, reminder_id: int) -> None:
+    async def mark_reminder_sent(self, reminder_id: int, sent_at: datetime | None = None) -> None:
         async with self.sessions() as session:
-            await session.execute(reminders.update().where(reminders.c.id == reminder_id).values(sent=True))
+            result = await session.execute(
+                select(reminders).where(reminders.c.id == reminder_id).with_for_update()
+            )
+            row = result.first()
+            if not row:
+                return
+            reminder = row._mapping
+            if reminder["cancelled"]:
+                return
+            interval = reminder["repeat_interval_minutes"]
+            repeat_until = reminder["repeat_until"]
+            if interval and repeat_until:
+                next_due = reminder["due_at"] + timedelta(minutes=interval)
+                if next_due <= repeat_until:
+                    await session.execute(
+                        reminders.update()
+                        .where(reminders.c.id == reminder_id)
+                        .values(due_at=next_due, sent=False)
+                    )
+                else:
+                    await session.execute(
+                        reminders.update()
+                        .where(reminders.c.id == reminder_id)
+                        .values(sent=True)
+                    )
+            else:
+                await session.execute(
+                    reminders.update()
+                    .where(reminders.c.id == reminder_id)
+                    .values(sent=True)
+                )
             await session.commit()
 
     async def generate_installments(self, current_day: date) -> list[dict[str, Any]]:

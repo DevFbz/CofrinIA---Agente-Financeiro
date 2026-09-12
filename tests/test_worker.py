@@ -42,3 +42,32 @@ async def test_worker_runs_housekeeping_and_generation_cycle():
         ("recurring", current_day),
         ("installments", current_day),
     ]
+
+
+@pytest.mark.asyncio
+async def test_worker_dispatches_task_digest_at_17_brazil_time(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, endpoint, headers):
+            calls.append((endpoint, headers))
+            return FakeResponse()
+
+    monkeypatch.setenv("COFRIN_INTERNAL_TOKEN", "test-token")
+    monkeypatch.setenv("APP_INTERNAL_URL", "http://app:8000")
+    monkeypatch.setattr(worker.httpx, "AsyncClient", lambda **kwargs: FakeClient())
+
+    result = await worker.dispatch_task_digest_if_due(datetime(2026, 9, 12, 20, 0, tzinfo=UTC))
+
+    assert result is True
+    assert calls == [("http://app:8000/internal/tasks/digest/dispatch", {"X-Internal-Token": "test-token"})]
