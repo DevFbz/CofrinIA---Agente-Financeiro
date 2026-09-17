@@ -37,3 +37,37 @@ def test_extracts_pix_payment_method():
 
     assert result.payment_method == "Pix"
     assert result.description == "almoço"
+
+
+def test_parses_pharmacy_and_removes_reais_from_description():
+    result = parse_transaction_text("Gastei 21 reais na farmácia no crédito")
+
+    assert result.amount == pytest.approx(21)
+    assert result.description == "farmácia"
+    assert result.category == "saude"
+    assert result.payment_method == "Cartão de crédito"
+
+
+def test_parses_short_informal_message_with_amount_at_end():
+    result = parse_transaction_text("padaria 15")
+
+    assert result.amount == pytest.approx(15)
+    assert result.description == "padaria"
+    assert result.category == "alimentacao"
+
+
+def test_parses_short_pharmacy_message_with_decimal_amount_at_end():
+    result = parse_transaction_text("farmácia 48,90")
+
+    assert result.amount == pytest.approx(48.90)
+    assert result.description == "farmácia"
+    assert result.category == "saude"
+
+
+def test_strips_speech_filler_before_transaction_verb():
+    result = parse_transaction_text("Um gastei 30 reais no almoço, via Pix.")
+
+    assert result.amount == 30
+    assert result.description == "almoço"
+    assert result.category == "alimentacao"
+    assert result.payment_method == "Pix"

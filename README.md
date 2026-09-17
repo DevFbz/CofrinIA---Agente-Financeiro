@@ -54,18 +54,33 @@ Tudo certo por aqui 😊
 |---|---:|
 | Registro de despesas e receitas | ✅ Implementado |
 | Categorias automáticas | ✅ Implementado |
+| Correção de categoria após lançamento | ✅ Implementado |
 | Identificação de Pix, dinheiro, crédito, débito e cartões | ✅ Implementado |
 | Usuários por telefone | ✅ Implementado |
 | Persistência PostgreSQL | ✅ Implementado |
 | Idempotência por mensagem WhatsApp | ✅ Implementado |
 | Consultas de quantidade e lançamentos recentes | ✅ Implementado |
+| Relatórios filtrados por categoria | ✅ Implementado |
+| Consulta de pagamentos recorrentes | ✅ Implementado |
+| Lembretes em minutos, horas, dias e horários absolutos | ✅ Implementado |
+| Lembretes automáticos de hora em hora por 48 horas | ✅ Implementado |
+| Lista de tarefas derivada dos lembretes | ✅ Implementado |
+| Cancelamento e conclusão de tarefas por conversa | ✅ Implementado |
+| Resumo diário de tarefas às 17:00 | ✅ Implementado |
+| Limpeza de histórico com confirmação explícita | ✅ Implementado |
 | Integração Evolution API | ✅ Implementado |
 | Transcrição local com faster-whisper | ✅ Implementado |
 | Leitura local de imagem de comprovante com OCR | ✅ Implementado |
-| Relatórios mensais completos | 🚧 Próxima etapa |
-| Leitura de PDF de nota fiscal | 🚧 Próxima etapa |
-| Orçamentos e metas | 🚧 Próxima etapa |
-| Hermes Agent no fluxo de produção | 🚧 Planejado |
+| Relatórios diário, semanal e mensal | ✅ Implementado |
+| Confirmação humana persistente | ✅ Implementado |
+| Fallback Hermes para mensagens ambíguas | ✅ Implementado |
+| Atendimento conversacional Hermes com histórico curto | ✅ Implementado |
+| Reply nativo e presença `composing` no WhatsApp | ✅ Implementado |
+| Worker de recorrências, parcelas e expiração | ✅ Implementado |
+| Idempotência de mensagens e entregas | ✅ Implementado |
+| Métricas operacionais `/metrics` | ✅ Implementado |
+| Exportação CSV e Excel | ✅ Implementado |
+| Importação de PDF | ⛔ Não utilizada |
 
 ---
 
@@ -75,16 +90,25 @@ Tudo certo por aqui 😊
 flowchart LR
     W[📱 WhatsApp] --> E[🔌 Evolution API]
     E -->|messages-upsert| A[⚡ FastAPI]
-    A --> P[🧠 Parser determinístico]
-    A --> S[💼 FinanceService]
+    A --> M[🎙️ Áudio / 🧾 OCR]
+    M --> C[🧠 Contexto por telefone]
+    A --> P[🧠 Parser seguro]
+    C --> H[🤖 Hermes conversacional]
+    P -. fallback/ambiguidade .-> H
+    H --> V[✅ Validação de intenção]
+    P --> V
+    V --> S[💼 FinanceService]
     S --> D[(🐘 PostgreSQL)]
-    S --> R[💬 Resposta cordial]
+    S --> T[📋 Tarefas + lembretes]
+    S --> R[💬 Reply + presença]
+    S --> CLR[🧹 Limpeza confirmada por telefone]
     R --> E
     E --> W
-
-    E -. áudio .-> M[🎙️ Download da mídia]
-    M --> T[🗣️ faster-whisper local]
-    T --> P
+    S --> CFM[✅ Confirmação humana]
+    CFM --> D
+    A --> WKR[⚙️ Worker / n8n scheduler]
+    WKR --> D
+    CLR --> D
 ```
 
 ### Princípios importantes
@@ -95,6 +119,20 @@ flowchart LR
 4. **Eventos do WhatsApp são idempotentes por ID da mensagem.**
 5. **Segredos ficam fora do código e fora do Git.**
 6. **Erros internos são registrados nos logs, mas nunca expostos ao usuário.**
+7. **Hermes interpreta e conversa; o backend valida e executa.**
+8. **Datas e horários são resolvidos pelo backend em `America/Sao_Paulo`.**
+9. **Operações destrutivas exigem confirmação literal e são limitadas ao telefone solicitante.**
+
+### Gates de qualidade
+
+Antes de publicar alterações, o projeto deve passar por:
+
+```bash
+uv lock --check
+uv run pytest -q
+uv run ruff check app tests
+git diff --check
+```
 
 ---
 
@@ -110,13 +148,23 @@ finance-whatsapp-assistant/
 │   ├── infrastructure/
 │   │   └── repository.py         # PostgreSQL/SQLite e idempotência
 │   ├── integrations/
-│   │   └── audio.py              # Evolution + faster-whisper
+│   │   ├── audio.py              # Evolution + faster-whisper
+│   │   ├── exports.py             # CSV e Excel
+│   │   └── hermes.py             # Fallback estruturado
 │   ├── services/
 │   │   └── finance.py            # Casos de uso e respostas
-│   └── main.py                   # FastAPI e webhooks
+│   ├── main.py                   # FastAPI e webhooks
+│   └── worker.py                 # Ciclo de tarefas em background
+├── infra/
+│   └── hermes-bridge/app.py      # Ponte Hermes sem segredos
 ├── tests/
+│   ├── test_advanced_domain.py
+│   ├── test_delivery_idempotency.py
 │   ├── test_audio.py
+│   ├── test_exports.py
 │   ├── test_finance_service.py
+│   ├── test_hermes.py
+│   ├── test_worker.py
 │   ├── test_transactions.py
 │   └── test_webhooks.py
 ├── Dockerfile
@@ -127,6 +175,16 @@ finance-whatsapp-assistant/
 ├── .env.example
 └── .env.production.example
 ```
+
+---
+
+## 📚 Documentação complementar
+
+| Documento | Conteúdo |
+|---|---|
+| [Comandos e linguagem natural](docs/COMMANDS.md) | Mensagens, correções, relatórios, recorrências, lembretes, áudio e imagens |
+| [Referência da API](docs/API.md) | Webhooks, endpoints internos, exportações, métricas e ponte Hermes |
+| [Operação e deploy](docs/OPERATIONS.md) | Configuração, backups, worker, idempotência, logs e troubleshooting |
 
 ---
 
@@ -236,7 +294,19 @@ Serviços incluídos:
 | `postgres` | Dados financeiros | Rede Docker |
 | `redis` | Cache da Evolution | Rede Docker |
 | `evolution` | Automação WhatsApp | Apenas localhost |
+| `worker` | Recorrências, parcelas e expiração | Sem portas públicas |
 | `caddy` | Proxy reverso | Portas 80/443 |
+
+### Exportação de lançamentos
+
+Os endpoints internos exportam apenas os lançamentos do telefone informado e exigem `X-Internal-Token`:
+
+```text
+GET /internal/exports/transactions.csv?phone=5511999999999
+GET /internal/exports/transactions.xlsx?phone=5511999999999
+```
+
+O CSV usa UTF-8 com BOM e delimitador `;`, adequado ao Excel em português. O Excel é gerado com a aba `Lançamentos`, filtros e valores numéricos formatados como moeda.
 
 Verifique o estado:
 
@@ -271,7 +341,8 @@ O projeto usa `faster-whisper` localmente por padrão:
 
 ```env
 AUDIO_TRANSCRIPTION_PROVIDER=local
-WHISPER_MODEL_SIZE=base
+WHISPER_MODEL_SIZE=small
+WHISPER_BEAM_SIZE=5
 WHISPER_DEVICE=cpu
 WHISPER_COMPUTE_TYPE=int8
 ```
@@ -310,6 +381,10 @@ A suíte atual cobre:
 - webhook Evolution;
 - mensagens próprias do bot;
 - fallback de áudio.
+- confirmação, correção, cancelamento e expiração de pendências;
+- idempotência de entregas agendadas;
+- worker em ciclo contínuo;
+- métricas operacionais.
 
 Comandos:
 
@@ -322,15 +397,11 @@ uv run ruff check app tests
 
 ## 🛣️ Próximos passos
 
-- [ ] Relatórios mensais enviados automaticamente;
-- [ ] Resumos por categoria e forma de pagamento;
-- [ ] Importação de PDF de nota fiscal;
-- [ ] Despesas parceladas e recorrentes;
-- [ ] Orçamentos e metas financeiras;
-- [ ] Exportação CSV/Excel;
-- [ ] Integração controlada com Hermes Agent;
-- [ ] Watchdog para reconexão da Evolution;
-- [ ] API oficial da Meta como alternativa de produção.
+- [ ] Revisar/remover, com autorização, os três lançamentos históricos criados a partir de horários;
+- [ ] Implementar retenção configurável para o histórico conversacional;
+- [ ] Watchdog dedicado para reconexão da Evolution;
+- [ ] Avaliar migração para a API oficial da Meta;
+- [ ] Avaliar gateway WhatsApp nativo do Hermes em número separado.
 
 ---
 

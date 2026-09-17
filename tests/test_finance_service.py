@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -45,12 +46,44 @@ async def test_registration_reply_includes_payment_method(service):
 
 
 @pytest.mark.asyncio
+async def test_registration_reply_includes_real_date_and_health_category(service):
+    result = await service.process_message(
+        "Gastei 21 reais na farmácia no crédito",
+        phone="5511999999010",
+        today=date(2026, 9, 8),
+    )
+
+    assert "Saúde" in result.reply
+    assert "farmácia" in result.reply
+    assert "Data: 08/09/2026" in result.reply
+    assert "Data: hoje" not in result.reply
+
+
+@pytest.mark.asyncio
+async def test_saves_salary_and_alerts_once_at_each_ten_percent(service):
+    phone = "5511999999011"
+    salary = await service.process_message("Meu salário é R$ 1.000", phone=phone, today=date(2026, 9, 8))
+    assert salary.transaction is None
+    assert "Salário mensal salvo" in salary.reply
+
+    first = await service.process_message("Gastei R$ 100 no almoço", phone=phone, today=date(2026, 9, 8))
+    second = await service.process_message("Gastei R$ 100 no lanche", phone=phone, today=date(2026, 9, 8))
+
+    assert "10,0%" in first.reply
+    assert "20,0%" in second.reply
+    assert await service.repository.get_salary(phone) == 100000
+
+
+@pytest.mark.asyncio
 async def test_first_message_introduces_assistant_and_teaches_basic_commands(service):
     result = await service.process_message("Oi", phone="5511999999002")
 
     assert result.transaction is None
     assert result.reply.count("Eu sou o *Cofrin*") == 1
     assert "Gastei R$ 32 no almoço" in result.reply
+    assert "áudio" in result.reply.lower()
+    assert "imagem" in result.reply.lower()
+    assert "confirmação" in result.reply.lower()
 
 
 @pytest.mark.asyncio
@@ -67,6 +100,46 @@ async def test_count_query_lists_expenses_and_total(service):
     assert "almoço" in result.reply
     assert "lanche" in result.reply
     assert "não consegui registrar" not in result.reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_my_expenses_query_lists_recent_expenses(service):
+    phone = "5511999999040"
+    await service.process_message("Gastei R$ 32 no almoço", phone=phone, message_id="recent-expenses-1")
+    await service.process_message("Gastei R$ 18 no lanche", phone=phone, message_id="recent-expenses-2")
+
+    result = await service.process_message("Minhas despesas", phone=phone, message_id="recent-expenses-3")
+
+    assert "Seus lançamentos" in result.reply
+    assert "almoço" in result.reply
+    assert "lanche" in result.reply
+    assert "R$ 50,00" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_recent_expenses_query_lists_expenses_instead_of_generic_summary(service):
+    phone = "5511999999041"
+    await service.process_message("Gastei R$ 24 no mercado", phone=phone, message_id="recent-expenses-4")
+
+    result = await service.process_message("Mostrar despesas recentes", phone=phone, message_id="recent-expenses-5")
+
+    assert "mercado" in result.reply
+    assert "Seus lançamentos" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_category_breakdown_query_groups_expenses_by_category(service):
+    phone = "5511999999042"
+    await service.process_message("Gastei R$ 32 no almoço", phone=phone, message_id="category-breakdown-1")
+    await service.process_message("Gastei R$ 20 na gasolina", phone=phone, message_id="category-breakdown-2")
+
+    result = await service.process_message("Separar por categoria", phone=phone, message_id="category-breakdown-3")
+
+    assert "gastos por categoria" in result.reply.lower()
+    assert "Alimentação" in result.reply
+    assert "Transporte" in result.reply
+    assert "R$ 32,00" in result.reply
+    assert "R$ 20,00" in result.reply
 
 
 @pytest.mark.asyncio
@@ -99,3 +172,552 @@ async def test_message_id_is_idempotent(service):
     assert second.duplicate is True
     result = await service.process_message("Quantas despesas eu tenho?", phone=phone)
     assert "1 despesa registrada" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_delete_history_requires_exact_confirmation_and_removes_user_data(service):
+    phone = "5511999999050"
+    await service.process_message("Gastei R$ 32 no almoço", phone=phone, message_id="delete-history-expense")
+    await service.process_message("Me lembre de comprar o presente", phone=phone, message_id="delete-history-task")
+
+    request = await service.process_message("Apagar todo meu histórico", phone=phone, message_id="delete-history-request")
+    assert "APAGAR TUDO" in request.reply
+    assert await service.repository.count_expenses(phone) == (1, 3200)
+
+    not_confirmed = await service.process_message("confirmar", phone=phone, message_id="delete-history-not-confirmed")
+    assert "não apaguei" in not_confirmed.reply.lower() or "apagar tudo" in not_confirmed.reply.lower()
+    assert await service.repository.count_expenses(phone) == (1, 3200)
+
+    deleted = await service.process_message("APAGAR TUDO", phone=phone, message_id="delete-history-confirmed")
+
+    assert deleted.history_deleted is True
+    assert "histórico foi apagado" in deleted.reply.lower()
+    assert await service.repository.count_expenses(phone) == (0, 0)
+    assert await service.repository.list_tasks(phone) == []
+    assert await service.repository.list_reminders(phone) == []
+    assert await service.repository.recent_conversation(phone) == []
+    assert await service.repository.get_pending_data_deletion(phone) is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_delete_history_preserves_data(service):
+    phone = "5511999999051"
+    await service.process_message("Gastei R$ 18 no lanche", phone=phone, message_id="cancel-delete-expense")
+    await service.process_message("Apagar tudo", phone=phone, message_id="cancel-delete-request")
+
+    cancelled = await service.process_message("cancelar", phone=phone, message_id="cancel-delete-confirmation")
+
+    assert "não apaguei" in cancelled.reply.lower()
+    assert await service.repository.count_expenses(phone) == (1, 1800)
+    assert await service.repository.get_pending_data_deletion(phone) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_history_is_scoped_to_confirming_phone(service):
+    first_phone = "5511999999052"
+    second_phone = "5511999999053"
+    await service.process_message("Gastei R$ 10 no café", phone=first_phone, message_id="scope-first")
+    await service.process_message("Gastei R$ 20 no almoço", phone=second_phone, message_id="scope-second")
+    await service.process_message("Apagar todo meu histórico", phone=first_phone, message_id="scope-request")
+    await service.process_message("APAGAR TUDO", phone=first_phone, message_id="scope-confirm")
+
+    assert await service.repository.count_expenses(first_phone) == (0, 0)
+    assert await service.repository.count_expenses(second_phone) == (1, 2000)
+
+
+@pytest.mark.asyncio
+async def test_pending_confirmation_accepts_category_correction(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "create_expense",
+                "amount": 240.0,
+                "description": "compra",
+                "category": "outros",
+                "payment_method": "Cartão",
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999020"
+
+    pending_reply = await service.process_message("Uma compra estranha", phone=phone, message_id="ambiguous-1")
+    assert "confirmar" in pending_reply.reply
+
+    correction_reply = await service.process_message(
+        "corrigir categoria alimentação",
+        phone=phone,
+        message_id="correction-1",
+    )
+
+    assert "corrigi" in correction_reply.reply.lower()
+    pending = await service.repository.get_pending_confirmation(phone)
+    assert pending["category"] == "alimentacao"
+
+
+@pytest.mark.asyncio
+async def test_expire_pending_confirmation_changes_status(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "create_expense",
+                "amount": 100.0,
+                "description": "compra",
+                "category": "outros",
+                "payment_method": "não informado",
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999021"
+    await service.process_message("Uma compra estranha", phone=phone, message_id="ambiguous-2")
+    pending = await service.repository.get_pending_confirmation(phone)
+    await service.repository.update_confirmation(
+        pending["id"],
+        {"expires_at": datetime.now(UTC) - timedelta(minutes=1)},
+    )
+
+    expired = await service.repository.expire_pending_confirmations(datetime.now(UTC))
+
+    assert expired == 1
+    assert await service.repository.get_pending_confirmation(phone) is None
+
+
+@pytest.mark.asyncio
+async def test_confirmation_command_without_pending_does_not_call_hermes(service, monkeypatch):
+    calls = 0
+
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            nonlocal calls
+            calls += 1
+            return {
+                "intent": "create_expense",
+                "amount": 100.0,
+                "description": "compra",
+                "category": "outros",
+                "payment_method": "não informado",
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999022"
+    await service.process_message("Uma compra estranha", phone=phone, message_id="ambiguous-3")
+    confirmed = await service.process_message("confirmar", phone=phone, message_id="confirmation-3")
+    repeated = await service.process_message("confirmar", phone=phone, message_id="confirmation-4")
+
+    assert confirmed.transaction is not None
+    assert "nenhum" in repeated.reply.lower() or "não há" in repeated.reply.lower()
+    assert calls == 1
+    assert await service.repository.count_expenses(phone) == (1, 10000)
+
+
+@pytest.mark.asyncio
+async def test_confirm_pending_is_atomic_and_idempotent(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "create_expense",
+                "amount": 75.0,
+                "description": "compra",
+                "category": "outros",
+                "payment_method": "Pix",
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999023"
+    await service.process_message("Uma compra estranha", phone=phone, message_id="ambiguous-4")
+    pending = await service.repository.get_pending_confirmation(phone)
+
+    first = await service.repository.confirm_pending_confirmation(pending["id"], phone, date(2026, 9, 9))
+    second = await service.repository.confirm_pending_confirmation(pending["id"], phone, date(2026, 9, 9))
+
+    assert first["id"] == pending["id"]
+    assert second is None
+    assert await service.repository.count_expenses(phone) == (1, 7500)
+
+
+@pytest.mark.asyncio
+async def test_expired_confirmation_is_not_confirmed(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "create_expense",
+                "amount": 80.0,
+                "description": "compra",
+                "category": "outros",
+                "payment_method": "Pix",
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999024"
+    await service.process_message("Uma compra estranha", phone=phone, message_id="ambiguous-5")
+    pending = await service.repository.get_pending_confirmation(phone)
+    await service.repository.update_confirmation(
+        pending["id"],
+        {"expires_at": datetime.now(UTC) - timedelta(minutes=1)},
+    )
+
+    result = await service.process_message("confirmar", phone=phone, message_id="confirmation-5")
+
+    assert result.transaction is None
+    assert "expirou" in result.reply.lower()
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_transaction_with_amount_requires_confirmation(service, monkeypatch):
+    calls = 0
+
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            nonlocal calls
+            calls += 1
+            return {
+                "intent": "create_expense",
+                "amount": 240.0,
+                "description": "uma coisa",
+                "category": "outros",
+                "payment_method": "Cartão",
+                "confidence": 0.7,
+                "requires_confirmation": True,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999025"
+
+    result = await service.process_message(
+        "Gastei por volta de R$ 240 em uma coisa no cartão",
+        phone=phone,
+        message_id="ambiguous-6",
+    )
+
+    assert result.transaction is None
+    assert "confirmar" in result.reply.lower()
+    assert calls == 1
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_category_correction_updates_last_registered_transaction(service):
+    phone = "5511999999026"
+    await service.process_message("Gastei R$ 25 em uma compra", phone=phone, message_id="image-like-1")
+
+    result = await service.process_message(
+        "corrigir categoria para alimentação",
+        phone=phone,
+        message_id="correction-last-1",
+    )
+
+    rows = await service.repository.list_transactions(phone)
+    assert "atualizei" in result.reply.lower() or "corrigi" in result.reply.lower()
+    assert rows[0]["category"] == "alimentacao"
+
+
+@pytest.mark.asyncio
+async def test_category_report_filters_requested_category(service):
+    phone = "5511999999027"
+    await service.process_message("Gastei R$ 30 no almoço", phone=phone, message_id="category-report-1")
+    await service.process_message("Gastei R$ 20 na gasolina", phone=phone, message_id="category-report-2")
+
+    result = await service.process_message("relatório de alimentação", phone=phone, message_id="category-report-3")
+
+    assert "Alimentação" in result.reply
+    assert "R$ 30,00" in result.reply
+    assert "R$ 50,00" not in result.reply
+
+
+@pytest.mark.asyncio
+async def test_recurring_payment_query_lists_user_recurring_expenses(service):
+    phone = "5511999999028"
+    await service.process_message("internet de R$ 100 todo dia 10", phone=phone, message_id="recurring-create-1")
+
+    result = await service.process_message("consultar pagamentos recorrentes", phone=phone, message_id="recurring-query-1")
+
+    assert "internet" in result.reply.lower()
+    assert "recorr" in result.reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_natural_reminder_is_not_registered_as_expense(service):
+    phone = "5511999030010"
+
+    result = await service.process_message(
+        "Criar lembrete de melhorar o robô para orquestrar a infra às 18:30 horas",
+        phone=phone,
+        today=date(2026, 9, 10),
+    )
+
+    assert result.transaction is None
+    assert "Lembrete criado" in result.reply
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_explicit_calendar_date_is_persisted_without_shifting_to_next_day(service):
+    phone = "5511999030019"
+
+    result = await service.process_message(
+        "Criar lembrete para o dia 14/09 segunda-feira às 10:00, revisar o script",
+        phone=phone,
+        today=date(2026, 9, 12),
+        message_id="calendar-date-1",
+    )
+
+    assert "14/09 às 10:00" in result.reply
+    reminders = await service.repository.list_reminders(phone)
+    assert reminders[0]["due_at"].date().isoformat() == "2026-09-14"
+    assert reminders[0]["due_at"].hour == 10
+
+
+@pytest.mark.asyncio
+async def test_incomplete_reminder_request_asks_for_details(service):
+    phone = "5511999030011"
+
+    result = await service.process_message("Lembrete", phone=phone)
+
+    assert result.transaction is None
+    assert "o que" in result.reply.lower()
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_reminder_without_schedule_starts_hourly_task_flow(service):
+    phone = "5511999030017"
+
+    first = await service.process_message(
+        "Me lembra de comprar presente da Duda",
+        phone=phone,
+        message_id="pending-reminder-1",
+    )
+
+    assert "a cada 1 hora" in first.reply
+    assert "parar lembrete" in first.reply.lower()
+    assert await service.repository.get_pending_reminder(phone) is None
+    tasks = await service.repository.list_tasks(phone)
+    assert tasks[0]["title"] == "Comprar presente da Duda"
+
+
+@pytest.mark.asyncio
+async def test_reserve_money_phrase_is_not_registered_as_expense(service):
+    phone = "5511999030018"
+
+    result = await service.process_message("Separar 10 reais pra ida até Botafogo", phone=phone)
+
+    assert result.transaction is None
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_repository_keeps_recent_conversation_per_phone(service):
+    phone = "5511999030012"
+
+    await service.repository.append_conversation_message(phone, "user", "Gastei R$ 30 no almoço")
+    await service.repository.append_conversation_message(phone, "assistant", "Despesa registrada")
+
+    history = await service.repository.recent_conversation(phone)
+
+    assert [(item["role"], item["content"]) for item in history] == [
+        ("user", "Gastei R$ 30 no almoço"),
+        ("assistant", "Despesa registrada"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_general_message_with_amount_is_not_registered_as_expense(service):
+    phone = "5511999030013"
+
+    result = await service.process_message("Preciso de 1000 reais para uma emergência", phone=phone)
+
+    assert result.transaction is None
+    assert await service.repository.count_expenses(phone) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_hermes_receives_recent_turns_for_conversational_follow_up(service, monkeypatch):
+    calls = []
+
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            calls.append(history)
+            return {
+                "intent": "unknown",
+                "amount": None,
+                "description": None,
+                "category": None,
+                "payment_method": None,
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "reply": "Posso continuar a conversa com você.",
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999030014"
+
+    first = await service.process_message("Como posso organizar meu orçamento?", phone=phone, message_id="context-1")
+    await service.repository.append_conversation_message(phone, "assistant", first.reply)
+    second = await service.process_message("E isso?", phone=phone, message_id="context-2")
+
+    assert second.transaction is None
+    assert len(calls) == 2
+    assert [(item["role"], item["content"]) for item in calls[1][-2:]] == [
+        ("user", "Como posso organizar meu orçamento?"),
+        ("assistant", first.reply),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_hermes_reminder_schedule_is_resolved_by_backend(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "create_reminder",
+                "amount": None,
+                "description": None,
+                "category": None,
+                "payment_method": None,
+                "reminder_text": "revisar o orçamento",
+                "reminder_schedule": "às 18:30",
+                "confidence": 0.98,
+                "requires_confirmation": False,
+                "reply": None,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999030015"
+
+    result = await service.process_message("quero que você me ajude a lembrar disso", phone=phone)
+
+    assert result.transaction is None
+    assert "Lembrete criado" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_reminder_keeps_source_message_id_for_native_reply(service):
+    phone = "5511999030016"
+
+    result = await service.process_message(
+        "me lembre de revisar o orçamento em 10 minutos",
+        phone=phone,
+        message_id="reminder-source-1",
+    )
+
+    assert "Lembrete criado" in result.reply
+    reminders = await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=1))
+    assert reminders[-1]["source_message_id"] == "reminder-source-1"
+
+
+@pytest.mark.asyncio
+async def test_reminder_without_schedule_creates_task_and_hourly_notifications(service, monkeypatch):
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("app.services.finance.datetime", _FrozenDateTime(now))
+    phone = "5511999030031"
+
+    result = await service.process_message(
+        "Me lembre de comprar o presente da Duda",
+        phone=phone,
+        message_id="hourly-reminder-1",
+    )
+
+    assert result.transaction is None
+    assert "a cada 1 hora" in result.reply
+    assert "parar lembrete" in result.reply.lower()
+    tasks = await service.repository.list_tasks(phone)
+    assert tasks[0]["title"] == "Comprar o presente da Duda"
+    reminders = await service.repository.list_reminders(phone)
+    assert reminders[0]["repeat_interval_minutes"] == 60
+    expected_until = (now.astimezone(ZoneInfo("America/Sao_Paulo")) + timedelta(hours=48)).replace(tzinfo=None)
+    assert reminders[0]["repeat_until"] == expected_until
+    assert reminders[0]["task_id"] == tasks[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_task_list_shows_reminder_title_and_cancel_stops_notifications(service):
+    phone = "5511999030032"
+    await service.process_message(
+        "Me lembre de comprar o presente da Duda",
+        phone=phone,
+        message_id="task-list-1",
+    )
+
+    listed = await service.process_message("minha lista de tarefas", phone=phone, message_id="task-list-2")
+    assert "Comprar o presente da Duda" in listed.reply
+
+    cancelled = await service.process_message("parar lembrete", phone=phone, message_id="task-list-3")
+    assert "parei" in cancelled.reply.lower() or "cancel" in cancelled.reply.lower()
+    assert await service.repository.list_tasks(phone) == []
+    assert await service.repository.due_reminders(datetime.now(UTC) + timedelta(days=3)) == []
+
+
+@pytest.mark.asyncio
+async def test_complete_task_uses_the_number_shown_in_task_list(service):
+    phone = "5511999030033"
+    await service.process_message("Me lembre de comprar o presente da Duda", phone=phone, message_id="task-complete-1")
+
+    result = await service.process_message("concluir tarefa 1", phone=phone, message_id="task-complete-2")
+
+    assert "concluída" in result.reply.lower()
+    assert await service.repository.list_tasks(phone) == []
+
+
+class _FrozenDateTime:
+    def __init__(self, value):
+        self.value = value
+
+    def now(self, tz=None):
+        return self.value.astimezone(tz) if tz else self.value.replace(tzinfo=None)
+
+
+@pytest.mark.asyncio
+async def test_hermes_query_intent_returns_category_report(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "query_category",
+                "amount": None,
+                "description": None,
+                "category": "alimentacao",
+                "payment_method": None,
+                "confidence": 0.95,
+                "requires_confirmation": False,
+                "reply": None,
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+    phone = "5511999999029"
+    await service.process_message("Gastei R$ 30 no almoço", phone=phone, message_id="hermes-query-1")
+
+    result = await service.process_message("Como estão meus gastos com alimentação?", phone=phone, message_id="hermes-query-2")
+
+    assert "R$ 30,00" in result.reply
+    assert "Alimentação" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_hermes_reply_is_used_for_general_question(service, monkeypatch):
+    class FakeHermes:
+        async def interpret(self, phone, message, history=None):
+            return {
+                "intent": "unknown",
+                "amount": None,
+                "description": None,
+                "category": None,
+                "payment_method": None,
+                "confidence": 0.9,
+                "requires_confirmation": False,
+                "reply": "Posso ajudar com seus gastos, relatórios e pagamentos recorrentes.",
+            }
+
+    monkeypatch.setattr("app.services.finance.HermesInterpreter", FakeHermes)
+
+    result = await service.process_message("Qual a melhor forma de organizar minhas finanças?", phone="5511999999030", message_id="hermes-reply-1")
+
+    assert "organizar" not in result.reply.lower()
+    assert "pagamentos recorrentes" in result.reply.lower()

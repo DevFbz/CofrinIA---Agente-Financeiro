@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import binascii
 import io
 import os
 import re
 from typing import Any
 
 import httpx
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class ReceiptInterpretationError(RuntimeError):
@@ -71,6 +73,19 @@ def build_expense_text(ocr_text: str) -> str:
     return f"Gastei R$ {amount} no {merchant}{payment}"
 
 
+def _prepare_image_for_ocr(image_bytes: bytes) -> Image.Image:
+    """Normalize PNG/JPEG variants before sending them to Tesseract."""
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGBA")
+        background = Image.new("RGBA", image.size, "white")
+        image = Image.alpha_composite(background, image)
+        image = ImageOps.grayscale(image)
+        if max(image.size) < 1600:
+            scale = max(2, min(4, 1600 // max(image.size)))
+            image = image.resize((image.width * scale, image.height * scale), Image.Resampling.LANCZOS)
+        return ImageOps.autocontrast(image)
+
+
 class ReceiptInterpreter:
     def __init__(self, evolution_url: str | None = None, evolution_key: str | None = None, instance: str | None = None):
         self.evolution_url = evolution_url or os.getenv("EVOLUTION_API_URL")
@@ -84,14 +99,24 @@ class ReceiptInterpreter:
         try:
             import pytesseract
 
-            image = Image.open(io.BytesIO(image_bytes))
-            ocr_text = await __import__("asyncio").to_thread(
-                pytesseract.image_to_string,
-                image,
-                lang="por+eng",
-                config="--psm 6",
-            )
-            return build_expense_text(ocr_text)
+            image = _prepare_image_for_ocr(image_bytes)
+            errors = []
+            for lang in ("por+eng", "eng"):
+                for config in ("--psm 6", "--psm 11"):
+                    try:
+                        ocr_text = await asyncio.to_thread(
+                            pytesseract.image_to_string,
+                            image,
+                            lang=lang,
+                            config=config,
+                        )
+                        try:
+                            return build_expense_text(ocr_text)
+                        except ValueError as exc:
+                            errors.append(exc)
+                    except (OSError, RuntimeError, pytesseract.TesseractError) as exc:
+                        errors.append(exc)
+            raise ValueError(str(errors[-1]) if errors else "não encontrei o valor no comprovante")
         except (ValueError, OSError) as exc:
             raise ReceiptInterpretationError(str(exc)) from exc
         except Exception as exc:
@@ -115,6 +140,6 @@ class ReceiptInterpreter:
         if "," in encoded:
             encoded = encoded.split(",", 1)[1]
         try:
-            return base64.b64decode(encoded)
-        except ValueError as exc:
+            return base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
             raise ReceiptInterpretationError("imagem inválida") from exc
