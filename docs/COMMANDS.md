@@ -127,6 +127,22 @@ O que tenho para fazer?
 
 No final da tarde, às `17:00` no fuso `America/Sao_Paulo`, o bot envia automaticamente a lista de tarefas pendentes.
 
+## Apagar histórico
+
+Para solicitar a limpeza dos dados deste número:
+
+```text
+Apagar todo meu histórico
+```
+
+O bot explicará que a ação é permanente e pedirá a confirmação exata:
+
+```text
+APAGAR TUDO
+```
+
+Essa confirmação remove transações, conversas, lembretes, tarefas, confirmações pendentes, mensagens processadas e registros de entrega somente do telefone que confirmou. `sim` ou `confirmar` sozinhos não executam a exclusão. Para desistir, responda `cancelar` dentro de 15 minutos.
+
 ## Áudio
 
 Envie um áudio curto falando naturalmente, por exemplo:
@@ -158,6 +174,18 @@ O que devo fazer para reduzir despesas?
 ```
 
 O Hermes responde em português brasileiro e não grava dados diretamente.
+
+## Consultas de despesas
+
+```text
+Minhas despesas
+Mostrar despesas recentes
+Listar gastos
+Separar por categoria
+Gastos por categoria
+```
+
+As duas primeiras formas mostram os lançamentos recentes com descrição, categoria e valor. As formas de categoria exibem os totais agrupados por categoria, sem registrar uma nova despesa.
 
 ## Como o atendimento funciona
 

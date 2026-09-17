@@ -235,3 +235,51 @@ def test_repeating_reminder_dispatch_includes_stop_option_and_occurrence_key(mon
     assert response.status_code == 200
     assert "parar lembrete" in sent[0][0][1].lower()
     assert sent[0][0][2] == "reminder:7:2026-09-14T13:00:00+00:00"
+
+
+def test_history_delete_webhook_does_not_append_success_message(monkeypatch):
+    from app import main
+
+    class FakeRepository:
+        def __init__(self):
+            self.appended = []
+
+        async def append_conversation_message(self, *args):
+            self.appended.append(args)
+
+    class FakeService:
+        def __init__(self):
+            self.repository = FakeRepository()
+
+        async def process_message(self, message, phone, message_id=None):
+            return FinanceResult("✅ Seu histórico foi apagado.", None, history_deleted=True)
+
+    sent = []
+
+    async def fake_send_reply(*args, **kwargs):
+        sent.append((args, kwargs))
+        return True
+
+    original_service = main.finance_service
+    original_send = main._send_reply
+    service = FakeService()
+    main.finance_service = service
+    main._send_reply = fake_send_reply
+    try:
+        response = TestClient(app).post(
+            "/webhooks/evolution",
+            json={
+                "event": "messages.upsert",
+                "data": {
+                    "key": {"remoteJid": "5511999999001@s.whatsapp.net", "fromMe": False, "id": "delete-webhook-1"},
+                    "message": {"conversation": "APAGAR TUDO"},
+                },
+            },
+        )
+    finally:
+        main.finance_service = original_service
+        main._send_reply = original_send
+
+    assert response.status_code == 200
+    assert service.repository.appended == []
+    assert sent[0][0][2] is None

@@ -29,6 +29,7 @@ class FinanceResult:
     reply: str
     transaction: TransactionDraft | None
     duplicate: bool = False
+    history_deleted: bool = False
 
 
 _CATEGORY_LABELS = {
@@ -118,15 +119,52 @@ class FinanceService:
         history = await self.repository.recent_conversation(phone)
         if not await self.repository.mark_message_once(message_id, phone):
             return FinanceResult("", None, duplicate=True)
-        await self.repository.append_conversation_message(phone, "user", message, message_id)
+        normalized_input = self._normalize(message)
+        if normalized_input not in {"apagar tudo", "confirmar apagar tudo"}:
+            await self.repository.append_conversation_message(phone, "user", message, message_id)
 
         try:
-            current_day = today or datetime.now(BRAZIL_TIMEZONE).date()
-            normalized = self._normalize(message)
+            wall_now = datetime.now(BRAZIL_TIMEZONE)
+            current_day = today or wall_now.date()
+            processing_now = wall_now.replace(
+                year=current_day.year,
+                month=current_day.month,
+                day=current_day.day,
+            ) if today else wall_now
+            normalized = normalized_input
             await self.repository.mark_welcomed(phone)
             await self.repository.expire_pending_confirmations(datetime.now(UTC))
 
             await self.repository.expire_pending_reminders(datetime.now(UTC))
+            pending_deletion = await self.repository.get_pending_data_deletion(phone)
+            if pending_deletion:
+                if self._is_delete_history_confirmation(normalized):
+                    await self.repository.delete_all_user_data(phone)
+                    return FinanceResult(
+                        "✅ Seu histórico foi apagado com sucesso. Nenhuma transação, conversa, tarefa ou lembrete foi mantido.",
+                        None,
+                        history_deleted=True,
+                    )
+                if self._is_cancel_delete_history(normalized):
+                    await self.repository.cancel_data_deletion(pending_deletion["id"])
+                    return FinanceResult("✅ Tudo bem. Não apaguei seu histórico.", None)
+                if normalized in {"confirmar", "sim"}:
+                    return FinanceResult("⚠️ Para confirmar, envie exatamente: *APAGAR TUDO*. Ou responda *cancelar*.", None)
+
+            if self._is_delete_history_request(normalized):
+                await self.repository.request_data_deletion(phone)
+                return FinanceResult(
+                    self._with_welcome(
+                        "⚠️ Posso apagar todo o seu histórico deste número, incluindo transações, conversas, lembretes, tarefas, confirmações e registros de entrega.\n\n"
+                        "Essa ação é permanente e não pode ser desfeita.\n\n"
+                        "Se tiver certeza, responda exatamente *APAGAR TUDO*. Para desistir, responda *cancelar*.",
+                        first_message,
+                    ),
+                    None,
+                )
+            if self._is_delete_history_confirmation(normalized):
+                return FinanceResult("ℹ️ Não há uma solicitação de apagamento pendente. Primeiro envie *apagar todo meu histórico*.", None)
+
             if self._is_stop_reminder_request(normalized):
                 cancelled = await self.repository.cancel_active_reminders(phone)
                 pending_reminder = await self.repository.get_pending_reminder(phone)
@@ -183,7 +221,8 @@ class FinanceService:
                 if self._has_explicit_reminder_schedule(message):
                     try:
                         reminder = parse_reminder_text(
-                            f"me lembre de {pending_reminder['message']} {message}"
+                            f"me lembre de {pending_reminder['message']} {message}",
+                            now=processing_now,
                         )
                     except ValueError:
                         reminder = None
@@ -258,7 +297,7 @@ class FinanceService:
                 has_schedule = self._has_explicit_reminder_schedule(message)
                 reminder_from_hermes = False
                 try:
-                    reminder = parse_reminder_text(message)
+                    reminder = parse_reminder_text(message, now=processing_now)
                 except ValueError:
                     try:
                         interpreted = await HermesInterpreter().interpret(phone, message, history=history)
@@ -271,7 +310,7 @@ class FinanceService:
                             ),
                             None,
                         )
-                    reminder = self._reminder_from_hermes(interpreted)
+                    reminder = self._reminder_from_hermes(interpreted, now=processing_now)
                     reminder_from_hermes = reminder is not None
                     if reminder is None:
                         reminder_text = str(interpreted.get("reminder_text") or "").strip()
@@ -332,6 +371,14 @@ class FinanceService:
                 budget = parse_budget_text(message)
                 await self.repository.set_budget(phone, budget, current_day.strftime("%Y-%m"))
                 return FinanceResult(self._with_welcome(f"🎯 Limite salvo para *{budget.category}*: {self._money(budget.limit_amount)}.", first_message), None)
+
+            if self._is_recent_expenses_query(normalized):
+                reply = await self._count_expenses(phone)
+                return FinanceResult(self._with_welcome(reply, first_message), None)
+
+            if self._is_category_breakdown_query(normalized):
+                reply = await self._category_breakdown(phone)
+                return FinanceResult(self._with_welcome(reply, first_message), None)
 
             if self._is_count_query(normalized):
                 reply = await self._count_expenses(phone)
@@ -483,6 +530,42 @@ class FinanceService:
         return values
 
     @staticmethod
+    def _is_delete_history_request(message: str) -> bool:
+        return any(
+            phrase in message
+            for phrase in (
+                "apagar todo meu histórico",
+                "apagar todo meu historico",
+                "apagar todo o histórico",
+                "apagar todo o historico",
+                "apagar meu histórico",
+                "apagar meu historico",
+                "excluir todo meu histórico",
+                "excluir todo meu historico",
+                "excluir meu histórico",
+                "excluir meu historico",
+                "limpar todo meu histórico",
+                "limpar todo meu historico",
+                "limpar meu histórico",
+                "limpar meu historico",
+                "deletar meu histórico",
+                "deletar meu historico",
+                "apagar meus dados",
+                "excluir meus dados",
+                "deletar tudo",
+                "apagar tudo",
+            )
+        )
+
+    @staticmethod
+    def _is_delete_history_confirmation(message: str) -> bool:
+        return message in {"apagar tudo", "confirmar apagar tudo"}
+
+    @staticmethod
+    def _is_cancel_delete_history(message: str) -> bool:
+        return message in {"cancelar", "cancelar apagamento", "cancelar limpeza", "desistir"}
+
+    @staticmethod
     def _is_stop_reminder_request(message: str) -> bool:
         return bool(
             re.search(
@@ -555,7 +638,7 @@ class FinanceService:
         return bool(re.fullmatch(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", message.strip()))
 
     @staticmethod
-    def _reminder_from_hermes(data: dict[str, object]) -> ReminderDraft | None:
+    def _reminder_from_hermes(data: dict[str, object], now: datetime | None = None) -> ReminderDraft | None:
         if data.get("intent") != "create_reminder":
             return None
         reminder_text = str(data.get("reminder_text") or "").strip()
@@ -563,7 +646,10 @@ class FinanceService:
         if not reminder_text or not reminder_schedule:
             return None
         try:
-            return parse_reminder_text(f"me lembre de {reminder_text} {reminder_schedule}")
+            return parse_reminder_text(
+                f"me lembre de {reminder_text} {reminder_schedule}",
+                now=now,
+            )
         except ValueError:
             return None
 
@@ -603,6 +689,56 @@ class FinanceService:
             or "quantos gastos" in message
             or "número de despesas" in message
             or "numero de despesas" in message
+        )
+
+    @staticmethod
+    def _is_recent_expenses_query(message: str) -> bool:
+        return any(
+            phrase in message
+            for phrase in (
+                "minhas despesas",
+                "minha despesa",
+                "despesas recentes",
+                "mostrar despesas",
+                "mostrar gastos",
+                "listar despesas",
+                "listar gastos",
+                "últimas despesas",
+                "ultimas despesas",
+                "últimos gastos",
+                "ultimos gastos",
+                "meus lançamentos",
+                "meus lancamentos",
+            )
+        )
+
+    @staticmethod
+    def _is_category_breakdown_query(message: str) -> bool:
+        return any(
+            phrase in message
+            for phrase in (
+                "separar por categoria",
+                "separe por categoria",
+                "gastos por categoria",
+                "despesas por categoria",
+                "dividir por categoria",
+                "categorias dos gastos",
+            )
+        )
+
+    async def _category_breakdown(self, phone: str) -> str:
+        rows = await self.repository.category_expense_summary(phone)
+        if not rows:
+            return "📭 Ainda não encontrei despesas para separar por categoria."
+        lines = [
+            f"{self._category_icon(row['category'])} {_CATEGORY_LABELS.get(row['category'], 'Outros')}: *{self._money(row['amount_cents'] / 100)}* ({row['count']} lançamento(s))"
+            for row in rows
+        ]
+        total = sum(int(row["amount_cents"] or 0) for row in rows)
+        return (
+            "📊 *Seus gastos por categoria*\n\n"
+            + "\n".join(lines)
+            + f"\n\n💸 Total: *{self._money(total / 100)}*"
         )
 
     @staticmethod

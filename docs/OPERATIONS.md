@@ -131,6 +131,7 @@ O repositório executa `metadata.create_all` na inicialização e aplica altera�
 conversation_messages
 pending_reminders
 tasks
+data_deletion_requests
 pending_confirmations
 delivery_records
 ```
@@ -226,6 +227,10 @@ docker logs --since 15m finance-whatsapp-evolution-1
 ```
 
 Nunca publique `.env`, tokens, chaves, conteúdo de mensagens ou dumps do banco.
+
+## Limpeza de histórico
+
+O comando conversacional de limpeza exige duas etapas: solicitação de apagamento e confirmação literal `APAGAR TUDO`. A solicitação fica em `data_deletion_requests` por 15 minutos. A exclusão é executada em uma transação única, filtrada pelo telefone, e inclui dados financeiros, conversas, tarefas, lembretes, confirmações, idempotência e entregas desse usuário. A confirmação final não é adicionada novamente ao histórico.
 
 ## Troubleshooting
 

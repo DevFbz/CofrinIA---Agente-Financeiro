@@ -300,7 +300,8 @@ async def complete_reminder(reminder_id: int, x_internal_token: str | None = Hea
 @app.post("/api/process")
 async def process_message(request: ProcessMessageRequest) -> dict[str, Any]:
     result = await finance_service.process_message(request.message, request.phone)
-    await finance_service.repository.append_conversation_message(request.phone, "assistant", result.reply)
+    if not result.history_deleted:
+        await finance_service.repository.append_conversation_message(request.phone, "assistant", result.reply)
     return {"reply": result.reply, "transaction": result.transaction}
 
 
@@ -463,12 +464,13 @@ async def evolution_webhook(
         result.transaction is not None,
         len(result.reply),
     )
-    await finance_service.repository.append_conversation_message(
-        remote_jid.split("@")[0],
-        "assistant",
-        result.reply,
-    )
-    delivery_key = f"reply:{message_id}" if message_id else None
+    if not result.history_deleted:
+        await finance_service.repository.append_conversation_message(
+            remote_jid.split("@")[0],
+            "assistant",
+            result.reply,
+        )
+    delivery_key = None if result.history_deleted else (f"reply:{message_id}" if message_id else None)
     await _send_reply(
         destination,
         result.reply,

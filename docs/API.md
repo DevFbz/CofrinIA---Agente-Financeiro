@@ -112,6 +112,10 @@ Envia a lista de tarefas pendentes para cada usuário que possui tarefas. O work
 
 Uma tarefa é criada junto com cada lembrete. Pedidos sem data e horário criam uma tarefa pendente e um lembrete recorrente a cada 60 minutos, com término após 48 horas. O usuário pode responder `parar lembrete` ou `concluir tarefa` para interromper as notificações.
 
+## Limpeza de histórico
+
+A limpeza completa é iniciada pela conversa com `apagar todo meu histórico` e só é executada após a confirmação literal `APAGAR TUDO`. A solicitação expira em 15 minutos. A operação é atômica e limitada ao telefone autenticado pelo webhook; não existe endpoint público de exclusão por ID.
+
 ## Recorrências e parcelas
 
 ### `POST /internal/recurring/generate`

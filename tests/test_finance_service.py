@@ -103,6 +103,46 @@ async def test_count_query_lists_expenses_and_total(service):
 
 
 @pytest.mark.asyncio
+async def test_my_expenses_query_lists_recent_expenses(service):
+    phone = "5511999999040"
+    await service.process_message("Gastei R$ 32 no almoço", phone=phone, message_id="recent-expenses-1")
+    await service.process_message("Gastei R$ 18 no lanche", phone=phone, message_id="recent-expenses-2")
+
+    result = await service.process_message("Minhas despesas", phone=phone, message_id="recent-expenses-3")
+
+    assert "Seus lançamentos" in result.reply
+    assert "almoço" in result.reply
+    assert "lanche" in result.reply
+    assert "R$ 50,00" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_recent_expenses_query_lists_expenses_instead_of_generic_summary(service):
+    phone = "5511999999041"
+    await service.process_message("Gastei R$ 24 no mercado", phone=phone, message_id="recent-expenses-4")
+
+    result = await service.process_message("Mostrar despesas recentes", phone=phone, message_id="recent-expenses-5")
+
+    assert "mercado" in result.reply
+    assert "Seus lançamentos" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_category_breakdown_query_groups_expenses_by_category(service):
+    phone = "5511999999042"
+    await service.process_message("Gastei R$ 32 no almoço", phone=phone, message_id="category-breakdown-1")
+    await service.process_message("Gastei R$ 20 na gasolina", phone=phone, message_id="category-breakdown-2")
+
+    result = await service.process_message("Separar por categoria", phone=phone, message_id="category-breakdown-3")
+
+    assert "gastos por categoria" in result.reply.lower()
+    assert "Alimentação" in result.reply
+    assert "Transporte" in result.reply
+    assert "R$ 32,00" in result.reply
+    assert "R$ 20,00" in result.reply
+
+
+@pytest.mark.asyncio
 async def test_count_query_uses_singular_for_one_expense(service):
     phone = "5511999999005"
     await service.process_message("Gastei R$ 32 no almoço", phone=phone)
@@ -132,6 +172,57 @@ async def test_message_id_is_idempotent(service):
     assert second.duplicate is True
     result = await service.process_message("Quantas despesas eu tenho?", phone=phone)
     assert "1 despesa registrada" in result.reply
+
+
+@pytest.mark.asyncio
+async def test_delete_history_requires_exact_confirmation_and_removes_user_data(service):
+    phone = "5511999999050"
+    await service.process_message("Gastei R$ 32 no almoço", phone=phone, message_id="delete-history-expense")
+    await service.process_message("Me lembre de comprar o presente", phone=phone, message_id="delete-history-task")
+
+    request = await service.process_message("Apagar todo meu histórico", phone=phone, message_id="delete-history-request")
+    assert "APAGAR TUDO" in request.reply
+    assert await service.repository.count_expenses(phone) == (1, 3200)
+
+    not_confirmed = await service.process_message("confirmar", phone=phone, message_id="delete-history-not-confirmed")
+    assert "não apaguei" in not_confirmed.reply.lower() or "apagar tudo" in not_confirmed.reply.lower()
+    assert await service.repository.count_expenses(phone) == (1, 3200)
+
+    deleted = await service.process_message("APAGAR TUDO", phone=phone, message_id="delete-history-confirmed")
+
+    assert deleted.history_deleted is True
+    assert "histórico foi apagado" in deleted.reply.lower()
+    assert await service.repository.count_expenses(phone) == (0, 0)
+    assert await service.repository.list_tasks(phone) == []
+    assert await service.repository.list_reminders(phone) == []
+    assert await service.repository.recent_conversation(phone) == []
+    assert await service.repository.get_pending_data_deletion(phone) is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_delete_history_preserves_data(service):
+    phone = "5511999999051"
+    await service.process_message("Gastei R$ 18 no lanche", phone=phone, message_id="cancel-delete-expense")
+    await service.process_message("Apagar tudo", phone=phone, message_id="cancel-delete-request")
+
+    cancelled = await service.process_message("cancelar", phone=phone, message_id="cancel-delete-confirmation")
+
+    assert "não apaguei" in cancelled.reply.lower()
+    assert await service.repository.count_expenses(phone) == (1, 1800)
+    assert await service.repository.get_pending_data_deletion(phone) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_history_is_scoped_to_confirming_phone(service):
+    first_phone = "5511999999052"
+    second_phone = "5511999999053"
+    await service.process_message("Gastei R$ 10 no café", phone=first_phone, message_id="scope-first")
+    await service.process_message("Gastei R$ 20 no almoço", phone=second_phone, message_id="scope-second")
+    await service.process_message("Apagar todo meu histórico", phone=first_phone, message_id="scope-request")
+    await service.process_message("APAGAR TUDO", phone=first_phone, message_id="scope-confirm")
+
+    assert await service.repository.count_expenses(first_phone) == (0, 0)
+    assert await service.repository.count_expenses(second_phone) == (1, 2000)
 
 
 @pytest.mark.asyncio
@@ -376,6 +467,7 @@ async def test_explicit_calendar_date_is_persisted_without_shifting_to_next_day(
     result = await service.process_message(
         "Criar lembrete para o dia 14/09 segunda-feira às 10:00, revisar o script",
         phone=phone,
+        today=date(2026, 9, 12),
         message_id="calendar-date-1",
     )
 

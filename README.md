@@ -67,6 +67,7 @@ Tudo certo por aqui 😊
 | Lista de tarefas derivada dos lembretes | ✅ Implementado |
 | Cancelamento e conclusão de tarefas por conversa | ✅ Implementado |
 | Resumo diário de tarefas às 17:00 | ✅ Implementado |
+| Limpeza de histórico com confirmação explícita | ✅ Implementado |
 | Integração Evolution API | ✅ Implementado |
 | Transcrição local com faster-whisper | ✅ Implementado |
 | Leitura local de imagem de comprovante com OCR | ✅ Implementado |
@@ -100,12 +101,14 @@ flowchart LR
     S --> D[(🐘 PostgreSQL)]
     S --> T[📋 Tarefas + lembretes]
     S --> R[💬 Reply + presença]
+    S --> CLR[🧹 Limpeza confirmada por telefone]
     R --> E
     E --> W
     S --> CFM[✅ Confirmação humana]
     CFM --> D
     A --> WKR[⚙️ Worker / n8n scheduler]
     WKR --> D
+    CLR --> D
 ```
 
 ### Princípios importantes
@@ -118,6 +121,18 @@ flowchart LR
 6. **Erros internos são registrados nos logs, mas nunca expostos ao usuário.**
 7. **Hermes interpreta e conversa; o backend valida e executa.**
 8. **Datas e horários são resolvidos pelo backend em `America/Sao_Paulo`.**
+9. **Operações destrutivas exigem confirmação literal e são limitadas ao telefone solicitante.**
+
+### Gates de qualidade
+
+Antes de publicar alterações, o projeto deve passar por:
+
+```bash
+uv lock --check
+uv run pytest -q
+uv run ruff check app tests
+git diff --check
+```
 
 ---
 

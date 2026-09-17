@@ -124,6 +124,17 @@ tasks = Table(
     Column("completed_at", DateTime(timezone=True), nullable=True),
 )
 
+data_deletion_requests = Table(
+    "data_deletion_requests",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("phone", String(32), nullable=False, index=True),
+    Column("scope", String(16), nullable=False, default="all"),
+    Column("status", String(16), nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+)
+
 pending_confirmations = Table(
     "pending_confirmations", metadata,
     Column("id", Integer, primary_key=True),
@@ -191,6 +202,15 @@ class FinanceRepository:
                 )
                 await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_tasks_phone ON tasks (phone)"))
                 await connection.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS public.data_deletion_requests ("
+                        "id SERIAL PRIMARY KEY, phone VARCHAR(32) NOT NULL, "
+                        "scope VARCHAR(16) NOT NULL DEFAULT 'all', status VARCHAR(16) NOT NULL DEFAULT 'pending', "
+                        "created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL)"
+                    )
+                )
+                await connection.execute(text("CREATE INDEX IF NOT EXISTS ix_data_deletion_requests_phone ON public.data_deletion_requests (phone)"))
+                await connection.execute(
                     text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS payment_method VARCHAR(64) NOT NULL DEFAULT 'não informado'")
                 )
             else:
@@ -241,6 +261,76 @@ class FinanceRepository:
                     await connection.execute(text(statement))
                 except SQLAlchemyError:
                     logger.warning("schema migration skipped statement=%s", statement)
+
+    async def request_data_deletion(self, phone: str, scope: str = "all") -> None:
+        now = datetime.now(UTC)
+        async with self.sessions() as session:
+            await session.execute(
+                data_deletion_requests.update()
+                .where(
+                    data_deletion_requests.c.phone == phone,
+                    data_deletion_requests.c.status == "pending",
+                )
+                .values(status="replaced")
+            )
+            await session.execute(
+                insert(data_deletion_requests).values(
+                    phone=phone,
+                    scope=scope,
+                    status="pending",
+                    created_at=now,
+                    expires_at=now + timedelta(minutes=15),
+                )
+            )
+            await session.commit()
+
+    async def get_pending_data_deletion(self, phone: str) -> dict[str, Any] | None:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(data_deletion_requests)
+                .where(
+                    data_deletion_requests.c.phone == phone,
+                    data_deletion_requests.c.status == "pending",
+                    data_deletion_requests.c.expires_at > datetime.now(UTC),
+                )
+                .order_by(desc(data_deletion_requests.c.id))
+                .limit(1)
+            )
+            row = result.first()
+            return dict(row._mapping) if row else None
+
+    async def cancel_data_deletion(self, request_id: int) -> None:
+        async with self.sessions() as session:
+            await session.execute(
+                data_deletion_requests.update()
+                .where(
+                    data_deletion_requests.c.id == request_id,
+                    data_deletion_requests.c.status == "pending",
+                )
+                .values(status="cancelled")
+            )
+            await session.commit()
+
+    async def delete_all_user_data(self, phone: str) -> dict[str, int]:
+        tables = (
+            ("transactions", transactions, transactions.c.phone == phone),
+            ("conversation_messages", conversation_messages, conversation_messages.c.phone == phone),
+            ("reminders", reminders, reminders.c.phone == phone),
+            ("pending_reminders", pending_reminders, pending_reminders.c.phone == phone),
+            ("pending_confirmations", pending_confirmations, pending_confirmations.c.phone == phone),
+            ("tasks", tasks, tasks.c.phone == phone),
+            ("processed_messages", processed_messages, processed_messages.c.phone == phone),
+            ("delivery_records", delivery_records, delivery_records.c.recipient == phone),
+            ("data_deletion_requests", data_deletion_requests, data_deletion_requests.c.phone == phone),
+            ("users", users, users.c.phone == phone),
+        )
+        deleted: dict[str, int] = {}
+        async with self.sessions() as session:
+            for name, table, condition in tables:
+                result = await session.execute(table.delete().where(condition))
+                deleted[name] = result.rowcount or 0
+            await session.commit()
+        return deleted
 
     async def close(self) -> None:
         await self.engine.dispose()
@@ -849,6 +939,20 @@ class FinanceRepository:
                 )
                 .where(transactions.c.phone == phone)
                 .order_by(desc(transactions.c.id))
+            )
+            return [dict(row._mapping) for row in result]
+
+    async def category_expense_summary(self, phone: str) -> list[dict[str, Any]]:
+        async with self.sessions() as session:
+            result = await session.execute(
+                select(
+                    transactions.c.category,
+                    func.count().label("count"),
+                    func.sum(transactions.c.amount_cents).label("amount_cents"),
+                )
+                .where(transactions.c.phone == phone, transactions.c.type == "expense")
+                .group_by(transactions.c.category)
+                .order_by(desc(func.sum(transactions.c.amount_cents)))
             )
             return [dict(row._mapping) for row in result]
 
